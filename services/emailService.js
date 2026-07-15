@@ -1,12 +1,21 @@
-// services/emailService.js - No extra packages needed!
+import nodemailer from 'nodemailer';
 
-/**
- * Send a password reset email with 6-digit verification code
- * Uses Resend API directly with fetch (Node 18+)
- */
+// ✅ Explicit SMTP config (more reliable on Render than the 'service' shorthand)
+const transporter = nodemailer.createTransport({
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // true for port 465, false for 587 (STARTTLS)
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+  family: 4, // force IPv4 — avoids Render's IPv6 ENETUNREACH issue
+  connectionTimeout: 10000, // fail fast (10s) instead of hanging
+});
+
 export const sendPasswordResetEmail = async ({ to, name, code }) => {
-  if (!process.env.RESEND_API_KEY) {
-    console.log('[EMAIL] Resend API key not configured — skipping send.');
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    console.log('[EMAIL] Gmail credentials not configured — skipping send.');
     return { sent: false, reason: 'email_not_configured' };
   }
 
@@ -26,28 +35,13 @@ export const sendPasswordResetEmail = async ({ to, name, code }) => {
   `;
 
   try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: 'SayNote <onboarding@resend.dev>',
-        to,
-        subject: 'Your SayNote password reset code',
-        html,
-      }),
+    await transporter.sendMail({
+      from: `"SayNote" <${process.env.GMAIL_USER}>`,
+      to,
+      subject: 'Your SayNote password reset code',
+      html,
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('❌ Resend API error:', data);
-      return { sent: false, reason: data.message || 'API error' };
-    }
-
-    console.log('✅ Password reset email sent to:', to, 'ID:', data.id);
+    console.log('✅ Password reset email sent to:', to);
     return { sent: true };
   } catch (error) {
     console.error('❌ Failed to send reset email:', error.message);
@@ -55,12 +49,9 @@ export const sendPasswordResetEmail = async ({ to, name, code }) => {
   }
 };
 
-/**
- * Send a reminder email to a client for a scheduled meeting
- */
 export const sendReminderEmail = async ({ to, clientName, eventTitle, startTime, videoCallLink }) => {
-  if (!process.env.RESEND_API_KEY) {
-    console.log('[EMAIL] Resend API key not configured — skipping send.');
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    console.log('[EMAIL] Gmail credentials not configured — skipping send.');
     return { sent: false, reason: 'email_not_configured' };
   }
 
@@ -82,28 +73,13 @@ export const sendReminderEmail = async ({ to, clientName, eventTitle, startTime,
   `;
 
   try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: 'SayNote <onboarding@resend.dev>',
-        to,
-        subject: `Reminder: ${eventTitle}`,
-        html,
-      }),
+    await transporter.sendMail({
+      from: `"SayNote" <${process.env.GMAIL_USER}>`,
+      to,
+      subject: `Reminder: ${eventTitle}`,
+      html,
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('❌ Resend API error:', data);
-      return { sent: false, reason: data.message || 'API error' };
-    }
-
-    console.log('✅ Reminder email sent to:', to, 'ID:', data.id);
+    console.log('✅ Reminder email sent to:', to);
     return { sent: true };
   } catch (error) {
     console.error('❌ Failed to send reminder email:', error.message);
