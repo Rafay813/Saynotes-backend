@@ -17,7 +17,8 @@ const userSchema = new mongoose.Schema({
   },
   clerkId: {
     type: String,
-    default: null,
+    // No default — leave unset for email/password signups so it's
+    // truly absent from the document, not stored as null.
   },
   timezone: {
     type: String,
@@ -42,6 +43,14 @@ const userSchema = new mongoose.Schema({
 }, {
   timestamps: true,
 });
+
+// ✅ Partial unique index — only enforces uniqueness on documents
+// where clerkId is an actual string, ignoring users where it's
+// missing/unset (i.e. email/password signups).
+userSchema.index(
+  { clerkId: 1 },
+  { unique: true, partialFilterExpression: { clerkId: { $type: 'string' } } }
+);
 
 // ✅ Hash password before saving - Modern async (no callback)
 userSchema.pre('save', async function () {
