@@ -134,7 +134,7 @@ export const registerPushToken = async (req, res) => {
   }
 };
 
-// ✅ Request password reset — sends 6-digit code via email
+// ✅ Request password reset — sends 6-digit code via email (NON-BLOCKING)
 export const requestPasswordReset = async (req, res) => {
   try {
     const { email } = req.body;
@@ -159,12 +159,21 @@ export const requestPasswordReset = async (req, res) => {
       resetPasswordExpires: expires,
     });
 
-    const result = await sendPasswordResetEmail({ to: user.email, name: user.name, code });
+    // ✅ DON'T AWAIT — fire and forget, so API responds immediately
+    // This prevents the request from hanging if Gmail is slow/unreachable
+    sendPasswordResetEmail({ to: user.email, name: user.name, code })
+      .then(result => {
+        if (result.sent) {
+          console.log('✅ Password reset email sent to:', user.email);
+        } else {
+          console.warn('⚠️ Reset email not sent:', result.reason);
+        }
+      })
+      .catch(err => {
+        console.error('⚠️ Reset email send failed (background):', err.message);
+      });
 
-    if (!result.sent) {
-      console.warn('⚠️ Reset email not sent:', result.reason);
-    }
-
+    // ✅ Respond immediately — don't wait for email to send
     res.status(200).json({ message: 'If that email exists, a reset code has been sent.' });
   } catch (error) {
     console.error('❌ Request password reset error:', error);

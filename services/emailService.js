@@ -1,12 +1,13 @@
 import nodemailer from 'nodemailer';
 
-// ✅ Configure nodemailer transporter
+// ✅ Configure nodemailer transporter with IPv4 fix for Render
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD,
   },
+  family: 4, // ✅ Forces IPv4 - fixes Render's IPv6 ENETUNREACH issue
 });
 
 /**
