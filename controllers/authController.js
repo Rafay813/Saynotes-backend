@@ -160,7 +160,7 @@ export const requestPasswordReset = async (req, res) => {
     });
 
     // ✅ DON'T AWAIT — fire and forget, so API responds immediately
-    // This prevents the request from hanging if Gmail is slow/unreachable
+    // This prevents the request from hanging if email service is slow
     sendPasswordResetEmail({ to: user.email, name: user.name, code })
       .then(result => {
         if (result.sent) {
