@@ -6,6 +6,8 @@ import {
   googleLogin,
   connectGoogleCalendar,
   registerPushToken,
+  requestPasswordReset,
+  resetPassword,
 } from '../controllers/authController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { getGoogleAuthUrl, exchangeAuthCode } from '../services/calendarService.js';
@@ -17,6 +19,8 @@ const router = express.Router();
 router.post('/register', registerUser);
 router.post('/login', loginUser);
 router.post('/google', googleLogin);
+router.post('/forgot-password', requestPasswordReset);
+router.post('/reset-password', resetPassword);
 
 // ✅ Protected routes
 router.get('/me', protect, getMe);

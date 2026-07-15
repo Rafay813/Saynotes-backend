@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import { exchangeAuthCode } from '../services/calendarService.js';
+import { sendPasswordResetEmail } from '../services/emailService.js';
 
 // ✅ Generate JWT
 const generateToken = (id) => {
@@ -129,6 +130,86 @@ export const registerPushToken = async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('❌ Push token error:', error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+// ✅ Request password reset — sends 6-digit code via email
+export const requestPasswordReset = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const user = await User.findOne({ email });
+
+    // ✅ Always return success even if user not found — prevents email enumeration
+    if (!user) {
+      return res.status(200).json({ message: 'If that email exists, a reset code has been sent.' });
+    }
+
+    // ✅ Generate 6-digit code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    await User.findByIdAndUpdate(user._id, {
+      resetPasswordCode: code,
+      resetPasswordExpires: expires,
+    });
+
+    const result = await sendPasswordResetEmail({ to: user.email, name: user.name, code });
+
+    if (!result.sent) {
+      console.warn('⚠️ Reset email not sent:', result.reason);
+    }
+
+    res.status(200).json({ message: 'If that email exists, a reset code has been sent.' });
+  } catch (error) {
+    console.error('❌ Request password reset error:', error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+// ✅ Reset password using the 6-digit code
+export const resetPassword = async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body;
+
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({ message: 'Email, code, and new password are required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user || !user.resetPasswordCode || !user.resetPasswordExpires) {
+      return res.status(400).json({ message: 'Invalid or expired code' });
+    }
+
+    if (user.resetPasswordCode !== code) {
+      return res.status(400).json({ message: 'Invalid or expired code' });
+    }
+
+    if (user.resetPasswordExpires < new Date()) {
+      return res.status(400).json({ message: 'Code has expired. Please request a new one.' });
+    }
+
+    // ✅ Set new password — triggers the pre('save') hash hook
+    user.password = newPassword;
+    user.resetPasswordCode = null;
+    user.resetPasswordExpires = null;
+    await user.save();
+
+    console.log('✅ Password reset successful for:', user.email);
+
+    res.status(200).json({ message: 'Password reset successful. Please sign in.' });
+  } catch (error) {
+    console.error('❌ Reset password error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
