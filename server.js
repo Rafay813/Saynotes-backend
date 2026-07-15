@@ -17,6 +17,10 @@ import { startCheckInWorker } from './workers/checkInWorker.js';
 
 const app = express();
 
+// ✅ Trust proxy - Required for Render/Heroku/any reverse-proxy host
+// This tells Express to trust the X-Forwarded-For header from the first proxy
+app.set('trust proxy', 1);
+
 // ✅ Rate Limiting
 const limiter = rateLimit({
   windowMs: 60 * 1000,
