@@ -1,4 +1,5 @@
 import { transcribeAudioWithGroq } from '../services/groqTranscriptionService.js';
+import { classifyTranscript } from '../services/groqClassificationService.js';
 import Item from '../models/Item.js';
 
 export const processVoice = async (req, res) => {
@@ -30,7 +31,7 @@ export const processVoice = async (req, res) => {
       size: req.file.size,
     });
 
-    // ✅ ONLY TRANSCRIBE - NO AI CLASSIFICATION
+    // ✅ Step 1: Transcribe with Groq
     console.log('🎤 Transcribing with Groq...');
     const transcript = await transcribeAudioWithGroq(req.file.buffer, req.file.mimetype);
     
@@ -43,21 +44,37 @@ export const processVoice = async (req, res) => {
 
     console.log('📝 Transcript:', transcript);
 
-    // ✅ Save as pending with default type "Note"
-    // User will select actual type in ConfirmationCard
+    // ✅ Step 2: Classify the transcript to predict type/title/time/priority
+    console.log('🤖 Classifying transcript...');
+    const classification = await classifyTranscript(transcript);
+
+    // ✅ Step 3: Save as pending with AI-predicted fields
+    // User will confirm/edit in ConfirmationCard
     const item = new Item({
       userId,
-      type: 'Note',
-      title: transcript.slice(0, 30),
+      type: classification.type,
+      title: classification.title,
       content: transcript,
       category: 'General',
+      priority: classification.priority,
+      startTime: classification.startTime,
       status: 'pending_confirmation',
     });
 
     const savedItem = await item.save();
-    console.log('✅ Pending item saved:', savedItem._id);
+    console.log('✅ Pending item saved:', savedItem._id, 'Predicted type:', savedItem.type);
 
     const processingTime = Date.now() - startTime;
+
+    // ✅ Step 4: Return response with proper date/time formatting
+    let date = null;
+    let time = null;
+    
+    if (savedItem.startTime) {
+      const startDate = new Date(savedItem.startTime);
+      date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
+      time = startDate.toISOString().split('T')[1]?.slice(0, 5); // HH:MM
+    }
 
     res.status(200).json({
       success: true,
@@ -66,8 +83,8 @@ export const processVoice = async (req, res) => {
         _id: savedItem._id,
         type: savedItem.type,
         title: savedItem.title,
-        date: savedItem.startTime || null,
-        time: null,
+        date: date,
+        time: time,
         completed: savedItem.status === 'completed',
       },
       processingTime: processingTime,
