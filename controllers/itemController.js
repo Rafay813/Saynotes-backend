@@ -3,7 +3,7 @@ import { syncWithGoogleCalendar } from '../services/calendarService.js';
 import { sendReminderEmail } from '../services/emailService.js';
 
 /**
- * @desc    Get items with filtering
+ * @desc    Get items with filtering (excludes expired by default)
  * @route   GET /api/items
  */
 export const getItems = async (req, res) => {
@@ -15,18 +15,31 @@ export const getItems = async (req, res) => {
     const userId = req.user._id;
     const query = { userId };
 
+    // ✅ Filter by type
     if (req.query.type) {
       const types = req.query.type.split(',');
       query.type = { $in: types };
     }
 
+    // ✅ Filter by status (exclude expired by default)
     if (req.query.status) {
       const statuses = req.query.status.split(',');
       query.status = { $in: statuses };
     } else {
-      query.status = { $nin: ['cancelled'] };
+      // ✅ Exclude expired and cancelled by default
+      query.status = { $nin: ['cancelled', 'expired'] };
     }
 
+    // ✅ Include expired items if explicitly requested
+    if (req.query.includeExpired === 'true') {
+      delete query.status;
+      if (req.query.status) {
+        const statuses = req.query.status.split(',');
+        query.status = { $in: statuses };
+      }
+    }
+
+    // ✅ Filter today's items
     if (req.query.today === 'true') {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -39,20 +52,24 @@ export const getItems = async (req, res) => {
       ];
     }
 
+    // ✅ Filter upcoming items
     if (req.query.upcoming === 'true') {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       query.startTime = { $gt: today };
     }
 
+    // ✅ Filter completed items
     if (req.query.completed === 'true') {
       query.status = 'completed';
     }
 
+    // ✅ Filter by category
     if (req.query.category) {
       query.category = req.query.category;
     }
 
+    // ✅ Search by title or content
     if (req.query.search) {
       const search = new RegExp(req.query.search, 'i');
       query.$or = [
@@ -88,7 +105,7 @@ export const getItems = async (req, res) => {
 };
 
 /**
- * @desc    Get single item
+ * @desc    Get single item (always returns even if expired)
  * @route   GET /api/items/:id
  */
 export const getItem = async (req, res) => {
@@ -126,7 +143,9 @@ export const createItem = async (req, res) => {
     const { 
       type, title, content, status, priority, category, 
       startTime, endTime, location, repeat, 
-      isClientBooking, clientName, clientEmail 
+      isClientBooking, clientName, clientEmail,
+      expiryBufferMinutes,
+      subtasks // ✅ Phase 2: Allow subtasks on create
     } = req.body;
 
     if (!title) {
@@ -147,14 +166,21 @@ export const createItem = async (req, res) => {
       endTime: endTime || null,
       location: location || null,
       repeat: repeat || 'none',
+      expiryBufferMinutes: expiryBufferMinutes || 60,
     };
 
-    // ✅ IMPORTANT: Add client booking fields BEFORE save
+    // ✅ Add client booking fields if Event
     if (type === 'Event' && isClientBooking === true) {
       itemData.isClientBooking = true;
       itemData.clientName = clientName || null;
       itemData.clientEmail = clientEmail || null;
       console.log('✅ Client booking enabled for Event');
+    }
+
+    // ✅ Phase 2: Add subtasks if provided
+    if (type === 'Task' && subtasks && Array.isArray(subtasks) && subtasks.length > 0) {
+      itemData.subtasks = subtasks.map(text => ({ text, done: false }));
+      console.log('✅ Subtasks added:', itemData.subtasks.length);
     }
 
     const item = new Item(itemData);
@@ -177,7 +203,7 @@ export const createItem = async (req, res) => {
 };
 
 /**
- * @desc    Update item
+ * @desc    Update item (only if not expired)
  * @route   PATCH /api/items/:id
  */
 export const updateItem = async (req, res) => {
@@ -195,10 +221,26 @@ export const updateItem = async (req, res) => {
       return res.status(404).json({ message: 'Item not found' });
     }
 
+    // ✅ Prevent updates to expired items
+    if (item.status === 'expired' || item.deletedAt) {
+      return res.status(400).json({ 
+        message: 'Cannot update expired items. They will be automatically deleted.' 
+      });
+    }
+
+    // ✅ Prevent updates to cancelled items
+    if (item.status === 'cancelled') {
+      return res.status(400).json({ 
+        message: 'Cannot update cancelled items.' 
+      });
+    }
+
+    // ✅ FIXED: Added 'videoCallLink' to allowed updates
     const allowedUpdates = [
       'type', 'title', 'content', 'status', 'priority', 'category', 
       'startTime', 'endTime', 'location', 'repeat', 
-      'isClientBooking', 'clientName', 'clientEmail'
+      'isClientBooking', 'clientName', 'clientEmail', 'videoCallLink',
+      'expiryBufferMinutes'
     ];
     const updates = req.body;
 
@@ -260,7 +302,7 @@ export const updateItem = async (req, res) => {
 };
 
 /**
- * @desc    Delete item
+ * @desc    Delete item (HARD DELETE - Admin only)
  * @route   DELETE /api/items/:id
  */
 export const deleteItem = async (req, res) => {
@@ -279,9 +321,9 @@ export const deleteItem = async (req, res) => {
     }
 
     await item.deleteOne();
-    console.log('🗑️ Item deleted:', req.params.id);
+    console.log('🗑️ Item permanently deleted:', req.params.id);
 
-    res.status(200).json({ message: 'Item deleted successfully' });
+    res.status(200).json({ message: 'Item permanently deleted' });
   } catch (error) {
     console.error('❌ Delete item error:', error);
     res.status(500).json({ message: 'Server Error' });
@@ -289,7 +331,7 @@ export const deleteItem = async (req, res) => {
 };
 
 /**
- * @desc    Update item status
+ * @desc    Update item status (only if not expired)
  * @route   PATCH /api/items/:id/status
  */
 export const updateItemStatus = async (req, res) => {
@@ -308,10 +350,22 @@ export const updateItemStatus = async (req, res) => {
       return res.status(404).json({ message: 'Item not found' });
     }
 
+    // ✅ Prevent status updates to expired items
+    if (item.status === 'expired' || item.deletedAt) {
+      return res.status(400).json({ 
+        message: 'Cannot update expired items. They will be automatically deleted.' 
+      });
+    }
+
     if (reschedule && new_startTime) {
       item.startTime = new Date(new_startTime);
       item.status = 'active';
     } else if (status) {
+      // ✅ Only allow valid statuses (not expired - that's auto-set)
+      if (!['pending_confirmation', 'active', 'completed', 'cancelled'].includes(status)) {
+        return res.status(400).json({ message: 'Invalid status' });
+      }
+      
       item.status = status;
       if (status === 'completed') {
         item.completedAt = new Date();
@@ -351,6 +405,13 @@ export const confirmItem = async (req, res) => {
 
     if (!item) {
       return res.status(404).json({ message: 'Item not found' });
+    }
+
+    // ✅ Prevent confirmation of expired items
+    if (item.status === 'expired' || item.deletedAt) {
+      return res.status(400).json({ 
+        message: 'Cannot confirm expired items. They will be automatically deleted.' 
+      });
     }
 
     if (action === 'cancel') {
@@ -411,6 +472,13 @@ export const sendReminder = async (req, res) => {
       return res.status(404).json({ message: 'Item not found' });
     }
 
+    // ✅ Prevent reminders for expired items
+    if (item.status === 'expired' || item.deletedAt) {
+      return res.status(400).json({ 
+        message: 'Cannot send reminder for expired items.' 
+      });
+    }
+
     if (!item.isClientBooking || !item.clientEmail) {
       return res.status(400).json({ message: 'This item has no client email to remind' });
     }
@@ -430,6 +498,85 @@ export const sendReminder = async (req, res) => {
     res.status(200).json({ message: 'Reminder sent successfully' });
   } catch (error) {
     console.error('❌ Send reminder error:', error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+/**
+ * @desc    Get expired items (admin only)
+ * @route   GET /api/items/expired
+ */
+export const getExpiredItems = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: 'User not authenticated' });
+    }
+
+    const items = await Item.find({
+      userId: req.user._id,
+      status: 'expired',
+      deletedAt: { $ne: null },
+    }).sort({ deletedAt: -1 });
+
+    res.status(200).json(items);
+  } catch (error) {
+    console.error('❌ Get expired items error:', error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+// ✅ Phase 2: Toggle subtask done/undone
+/**
+ * @desc    Toggle a subtask done/undone
+ * @route   PATCH /api/items/:id/subtask/:index
+ * @access  Private
+ */
+export const toggleSubtask = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: 'User not authenticated' });
+    }
+
+    const item = await Item.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+
+    if (!item) {
+      return res.status(404).json({ message: 'Item not found' });
+    }
+
+    // ✅ Prevent updates to expired items
+    if (item.status === 'expired' || item.deletedAt) {
+      return res.status(400).json({ 
+        message: 'Cannot update expired items. They will be automatically deleted.' 
+      });
+    }
+
+    const index = parseInt(req.params.index, 10);
+    if (!item.subtasks || !item.subtasks[index]) {
+      return res.status(404).json({ message: 'Subtask not found' });
+    }
+
+    // ✅ Toggle the subtask
+    item.subtasks[index].done = !item.subtasks[index].done;
+
+    // ✅ Auto-complete the whole Task when every subtask is done
+    const allDone = item.subtasks.every(s => s.done);
+    if (allDone && item.status !== 'completed') {
+      item.status = 'completed';
+      item.completedAt = new Date();
+      console.log('✅ All subtasks done - auto-completing task');
+    } else if (!allDone && item.status === 'completed') {
+      item.status = 'active';
+      item.completedAt = null;
+      console.log('🔄 Subtask unchecked - reopening task');
+    }
+
+    const updated = await item.save();
+    res.status(200).json(updated);
+  } catch (error) {
+    console.error('❌ Toggle subtask error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
