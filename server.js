@@ -1,11 +1,7 @@
-// ✅ Load environment variables FIRST - before ANY imports
-import dotenv from 'dotenv';
-dotenv.config();
-
-// ✅ Now import everything else
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
+import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { startAutoDeleteWorker, runInitialCleanup } from './workers/autoDeleteWorker.js';
@@ -17,15 +13,14 @@ import dashboardRoutes from './routes/dashboardRoutes.js';
 import voiceRoutes from './routes/voiceRoutes.js';
 import calendarRoutes from './routes/calendarRoutes.js';
 
+// Load environment variables
+dotenv.config();
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-// ✅ Debug: Check if GROQ_API_KEY is loaded
-console.log('🔑 GROQ_API_KEY exists:', !!process.env.GROQ_API_KEY);
-console.log('🔑 GROQ_API_KEY starts with:', process.env.GROQ_API_KEY?.substring(0, 10) + '...');
 
 // ✅ CORS configuration
 const corsOptions = {
@@ -56,24 +51,19 @@ app.use((req, res, next) => {
   next();
 });
 
-// ============================================
-// ✅ ROUTES - NEW /api/v1/... (Preferred)
-// ============================================
+// ✅ Routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/items', itemRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/voice', voiceRoutes);
 app.use('/api/v1/calendar', calendarRoutes);
 
-// ============================================
-// ✅ BACKWARD COMPATIBILITY - OLD /api/... (Legacy)
-// ============================================
-// These allow your frontend to work without updating all paths at once
-app.use('/api/auth', authRoutes);        // Legacy auth
-app.use('/api/items', itemRoutes);       // Legacy items
-app.use('/api/dashboard', dashboardRoutes); // ✅ Legacy dashboard (FIXED)
-app.use('/api/voice', voiceRoutes);      // Legacy voice
-app.use('/api/calendar', calendarRoutes); // Legacy calendar
+// ✅ Backward compatibility
+app.use('/api/auth', authRoutes);
+app.use('/api/items', itemRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/voice', voiceRoutes);
+app.use('/api/calendar', calendarRoutes);
 
 // ✅ Health check
 app.get('/', (req, res) => {
@@ -104,10 +94,10 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ✅ Connect to MongoDB and start server
+// ✅ Connect to MongoDB
 const connectDB = async () => {
   try {
-    const mongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/saynotes';
+    const mongoURI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/saynotes';
     await mongoose.connect(mongoURI);
     console.log('✅ MongoDB connected successfully');
     await createIndexes();
@@ -124,8 +114,7 @@ const createIndexes = async () => {
       { key: { userId: 1, type: 1, status: 1 } },
       { key: { userId: 1, startTime: 1 } },
       { key: { userId: 1, createdAt: -1 } },
-      { key: { endTime: 1, status: 1 } },
-      { key: { deletedAt: 1 } },
+      { key: { deleteAfter: 1 } },
     ]);
     console.log('✅ Database indexes created');
   } catch (error) {
@@ -143,17 +132,6 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
-      console.log(`📌 Routes available at:`);
-      console.log(`   - /api/v1/auth     (NEW)`);
-      console.log(`   - /api/v1/items    (NEW)`);
-      console.log(`   - /api/v1/dashboard (NEW)`);
-      console.log(`   - /api/v1/voice    (NEW)`);
-      console.log(`   - /api/v1/calendar (NEW)`);
-      console.log(`   - /api/auth        (LEGACY)`);
-      console.log(`   - /api/items       (LEGACY)`);
-      console.log(`   - /api/dashboard   (LEGACY) ✅ FIXED`);
-      console.log(`   - /api/voice       (LEGACY)`);
-      console.log(`   - /api/calendar    (LEGACY)`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

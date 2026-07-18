@@ -3,53 +3,63 @@ import Item from '../models/Item.js';
 
 // ✅ Run every hour
 export const startAutoDeleteWorker = () => {
-  console.log('🔄 Auto-delete worker started - running every hour at minute 0');
-  
-  // Run at minute 0 of every hour
+  console.log('🔄 Auto-delete worker started - running every hour');
+
   cron.schedule('0 * * * *', async () => {
     console.log(`🗑️ Running auto-delete cleanup at ${new Date().toISOString()}`);
+    
     try {
-      // Soft delete expired items
-      const deletedIds = await Item.cleanupExpiredItems();
-      console.log(`✅ Soft-deleted ${deletedIds.length} items`);
+      const now = new Date();
       
-      // Permanently remove items that were soft-deleted > 30 days ago
-      const permanentResult = await Item.permanentCleanup(30);
-      console.log(`✅ Permanently removed ${permanentResult.deletedCount} old items`);
+      // ✅ Step 1: Soft delete (mark as expired)
+      const softDeleteResult = await Item.updateMany(
+        {
+          deleteAfter: { $lte: now },
+          status: { $ne: 'expired' },
+        },
+        {
+          status: 'expired',
+          deletedAt: now,
+        }
+      );
       
+      console.log(`✅ Soft-deleted ${softDeleteResult.modifiedCount} items`);
+
+      // ✅ Step 2: Permanently delete items soft-deleted > 30 days ago
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const permanentResult = await Item.deleteMany({
+        deletedAt: { $lte: thirtyDaysAgo },
+        status: 'expired',
+      });
+      
+      console.log(`✅ Permanently deleted ${permanentResult.deletedCount} items`);
     } catch (error) {
       console.error('❌ Auto-delete worker error:', error);
     }
   });
 };
 
-// ✅ Run once at startup for immediate cleanup
+// ✅ Run once at startup
 export const runInitialCleanup = async () => {
   try {
-    console.log('🔄 Running initial cleanup at startup...');
-    const deletedIds = await Item.cleanupExpiredItems();
-    console.log(`✅ Initial cleanup: ${deletedIds.length} items soft-deleted`);
+    console.log('🔄 Running initial cleanup...');
+    const now = new Date();
     
-    // Also clean up old permanent items
-    const permanentResult = await Item.permanentCleanup(30);
-    console.log(`✅ Initial permanent cleanup: ${permanentResult.deletedCount} old items removed`);
+    const softDeleteResult = await Item.updateMany(
+      {
+        deleteAfter: { $lte: now },
+        status: { $ne: 'expired' },
+      },
+      {
+        status: 'expired',
+        deletedAt: now,
+      }
+    );
+    
+    console.log(`✅ Initial cleanup: ${softDeleteResult.modifiedCount} items soft-deleted`);
   } catch (error) {
     console.error('❌ Initial cleanup error:', error);
-  }
-};
-
-// ✅ Manual cleanup function (can be called from API)
-export const manualCleanup = async () => {
-  console.log('🔄 Running manual cleanup...');
-  try {
-    const deletedIds = await Item.cleanupExpiredItems();
-    const permanentResult = await Item.permanentCleanup(30);
-    return {
-      softDeleted: deletedIds.length,
-      permanentDeleted: permanentResult.deletedCount,
-    };
-  } catch (error) {
-    console.error('❌ Manual cleanup error:', error);
-    throw error;
   }
 };

@@ -10,7 +10,7 @@ import {
   confirmItem,
   sendReminder,
   getExpiredItems,
-  toggleSubtask, // ✅ Phase 2: Subtask toggle
+  toggleSubtask,
 } from '../controllers/itemController.js';
 
 const router = express.Router();
@@ -18,7 +18,7 @@ const router = express.Router();
 // ✅ Protected routes
 router.use(protect);
 
-// GET /api/items - Get all items with filters (excludes expired by default)
+// GET /api/items - Get all items with filters (timezone-aware)
 router.get('/', getItems);
 
 // GET /api/items/expired - Get expired items
@@ -30,22 +30,22 @@ router.get('/:id', getItem);
 // POST /api/items - Create item
 router.post('/', createItem);
 
-// PATCH /api/items/:id - Update item (only if not expired)
+// PATCH /api/items/:id - Update item
 router.patch('/:id', updateItem);
 
-// DELETE /api/items/:id - Delete item (hard delete - admin only)
+// DELETE /api/items/:id - Delete item
 router.delete('/:id', deleteItem);
 
-// PATCH /api/items/:id/status - Update status (only if not expired)
+// PATCH /api/items/:id/status - Update status
 router.patch('/:id/status', updateItemStatus);
 
-// ✅ Phase 2: PATCH /api/items/:id/subtask/:index - Toggle subtask
+// PATCH /api/items/:id/subtask/:index - Toggle subtask
 router.patch('/:id/subtask/:index', toggleSubtask);
 
-// POST /api/items/confirm - Confirm item (voice flow)
+// POST /api/items/confirm - Confirm item
 router.post('/confirm', confirmItem);
 
-// POST /api/items/:id/send-reminder - Send reminder email to client
+// POST /api/items/:id/send-reminder - Send reminder
 router.post('/:id/send-reminder', sendReminder);
 
 export default router;

@@ -66,7 +66,6 @@ const itemSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
-  // Client booking fields
   isClientBooking: {
     type: Boolean,
     default: false,
@@ -83,20 +82,10 @@ const itemSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
-  // ✅ Auto-delete tracking
-  deleteScheduled: {
-    type: Boolean,
-    default: false,
-  },
-  deletedAt: {
+  deleteAfter: {
     type: Date,
     default: null,
   },
-  expiryBufferMinutes: {
-    type: Number,
-    default: 60,
-  },
-  // ✅ Phase 1: Linked items (Reminder ↔ Event)
   linkedEventId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Item',
@@ -107,7 +96,6 @@ const itemSchema = new mongoose.Schema({
     ref: 'Item',
     default: null,
   },
-  // ✅ Phase 2: Subtasks/Checklist
   subtasks: [{
     text: { type: String, required: true },
     done: { type: Boolean, default: false },
@@ -116,89 +104,34 @@ const itemSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+// ✅ Helper function - can be imported from here
+export function computeDeleteAfter({ type, startTime, endTime }) {
+  const now = new Date();
+  
+  if (endTime) {
+    const d = new Date(endTime);
+    d.setMinutes(d.getMinutes() + 60);
+    return d;
+  }
+  
+  if (startTime) {
+    const d = new Date(startTime);
+    d.setHours(23, 59, 59, 999);
+    return d;
+  }
+  
+  const d = new Date(now);
+  d.setDate(d.getDate() + 7);
+  return d;
+}
+
+// ✅ NO middleware here - we'll handle deleteAfter in controllers
+
 // ✅ Indexes for performance
 itemSchema.index({ userId: 1, type: 1, status: 1 });
 itemSchema.index({ userId: 1, startTime: 1 });
 itemSchema.index({ userId: 1, createdAt: -1 });
-itemSchema.index({ endTime: 1, status: 1 });
-itemSchema.index({ deletedAt: 1 });
-
-// ✅ Method to check if item should be auto-deleted
-itemSchema.methods.shouldAutoDelete = function() {
-  if (this.deletedAt) return false;
-  if (this.status === 'cancelled') return false;
-  
-  const now = new Date();
-  
-  if (this.endTime) {
-    const expiryTime = new Date(this.endTime);
-    expiryTime.setMinutes(expiryTime.getMinutes() + (this.expiryBufferMinutes || 60));
-    return now >= expiryTime;
-  }
-  
-  if (this.startTime && !this.endTime) {
-    const expiryTime = new Date(this.startTime);
-    expiryTime.setHours(23, 59, 59, 999);
-    return now >= expiryTime;
-  }
-  
-  if (this.type === 'Note' || this.type === 'Reminder') {
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    return this.createdAt <= sevenDaysAgo;
-  }
-  
-  return false;
-};
-
-// ✅ Static method to find and delete expired items
-itemSchema.statics.cleanupExpiredItems = async function() {
-  const now = new Date();
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-  
-  const allItems = await this.find({
-    deletedAt: null,
-    status: { $nin: ['cancelled', 'expired'] },
-  });
-  
-  const expiredItems = [];
-  for (const item of allItems) {
-    if (item.shouldAutoDelete()) {
-      expiredItems.push(item);
-    }
-  }
-  
-  const deletedIds = [];
-  for (const item of expiredItems) {
-    try {
-      item.status = 'expired';
-      item.deletedAt = now;
-      item.deleteScheduled = true;
-      await item.save();
-      deletedIds.push(item._id);
-      console.log(`🗑️ Auto-deleted item: "${item.title}" (${item.type})`);
-    } catch (error) {
-      console.error(`❌ Failed to auto-delete item ${item._id}:`, error);
-    }
-  }
-  
-  return deletedIds;
-};
-
-// ✅ Static method to permanently remove old soft-deleted items
-itemSchema.statics.permanentCleanup = async function(daysToKeep = 30) {
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
-  
-  const result = await this.deleteMany({
-    deletedAt: { $lt: cutoffDate },
-    status: 'expired'
-  });
-  
-  console.log(`✅ Permanently deleted ${result.deletedCount} items`);
-  return result;
-};
+itemSchema.index({ deleteAfter: 1 });
 
 const Item = mongoose.model('Item', itemSchema);
 

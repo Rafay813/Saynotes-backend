@@ -26,11 +26,9 @@ export const getCalendarAgenda = async (req, res) => {
 
     console.log(`📅 Fetching calendar events from ${startDate} to ${endDate}`);
 
-    // ✅ Get local events - ONLY 'active' status
-    // ✅ Include items with no scheduled time, if created within this range
+    // ✅ Get local items - ALL types (Note, Task, Reminder, Event)
     const localEvents = await Item.find({
       userId: req.user._id,
-      type: 'Event',
       status: 'active', // ✅ HARD filter - ONLY active items
       $or: [
         { startTime: { $gte: startDate, $lte: endDate } },
@@ -43,6 +41,7 @@ export const getCalendarAgenda = async (req, res) => {
     console.log(`📦 Local events found: ${localEvents.length}`);
     console.log(`📦 Event statuses:`, localEvents.map(e => ({ 
       title: e.title, 
+      type: e.type,
       status: e.status,
       startTime: e.startTime,
       createdAt: e.createdAt

@@ -1,249 +1,259 @@
 import { transcribeAudioWithGroq, isGroqAvailable } from '../services/groqTranscriptionService.js';
 import { aiParsingService } from '../services/aiService.js';
 import { syncWithGoogleCalendar } from '../services/calendarService.js';
+import { parseDateTime, calculateEndTime, extractEmail, detectClientBooking } from '../utils/dateUtils.js';
 import Item from '../models/Item.js';
 
 /**
- * Process voice input - transcribe and create item
- * @route   POST /api/voice/process
- * @access  Private
+ * Process voice input
  */
 export const processVoice = async (req, res) => {
   try {
+    // ✅ Validate user
     if (!req.user) {
-      return res.status(401).json({ message: 'User not authenticated' });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ message: 'No audio file provided' });
-    }
-
-    if (!isGroqAvailable()) {
-      return res.status(503).json({ 
+      return res.status(401).json({
         success: false,
-        message: 'Voice service unavailable. Please check GROQ_API_KEY configuration.' 
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
+    }
+
+    // ✅ Validate audio
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No audio file provided',
+        errorCode: 'MISSING_AUDIO',
+      });
+    }
+
+    // ✅ Check Groq availability
+    if (!isGroqAvailable()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Voice service unavailable',
+        errorCode: 'SERVICE_UNAVAILABLE',
       });
     }
 
     console.log('🎤 Processing voice input...');
-    console.log('📁 File info:', {
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-    });
 
-    // ✅ Transcribe audio
-    const transcript = await transcribeAudioWithGroq(
-      req.file.buffer,
-      req.file.mimetype
-    );
-
-    if (!transcript || transcript.trim().length === 0) {
-      return res.status(400).json({ 
+    // ✅ Step 1: Transcribe
+    const transcription = await transcribeAudioWithGroq(req.file.buffer, req.file.mimetype);
+    if (!transcription.success) {
+      return res.status(400).json({
         success: false,
-        message: 'No speech detected. Please try again.' 
+        message: transcription.message,
+        errorCode: transcription.error,
       });
     }
 
-    console.log('📝 Transcript:', transcript);
+    const transcript = transcription.transcript;
+    console.log(`📝 Transcript: "${transcript}"`);
 
-    // ✅ Get user timezone from request
-    const userTimezone = req.body.timezone || 'UTC';
-    console.log('🌍 User timezone:', userTimezone);
+    // ✅ Step 2: AI Classification
+    const timezone = req.body.timezone || 'UTC';
+    console.log(`🌍 Timezone: ${timezone}`);
 
-    // ✅ Parse with AI
-    const parsed = await aiParsingService(transcript, {
-      timezone: userTimezone,
-      now: new Date(),
-    });
+    const classified = await aiParsingService(transcript);
+    console.log('🤖 Classified:', JSON.stringify(classified, null, 2));
 
-    console.log('🤖 Parsed result:', parsed);
-    console.log('📅 AI startTime (UTC):', parsed.startTime);
-    console.log('📌 Client booking detected:', parsed.isClientBooking ? 'YES' : 'NO');
-    console.log('📌 Subtasks detected:', parsed.subtasks?.length || 0);
+    // ✅ Step 3: Parse Date/Time - FIXED
+    let startTime = null;
+    let endTime = null;
 
-    // ✅ Create item data
+    console.log(`📅 Date from AI: "${classified.date}"`);
+    console.log(`⏰ Time from AI: "${classified.time}"`);
+
+    // ✅ FIX: If we have time but no date, default to "today"
+    let dateToUse = classified.date;
+    
+    if (!dateToUse && classified.time) {
+      dateToUse = 'today';
+      console.log('📅 No date provided, defaulting to "today"');
+    }
+
+    // Parse date and time
+    if (dateToUse) {
+      startTime = parseDateTime(dateToUse, classified.time, timezone);
+      console.log(`📅 Parsed startTime: ${startTime ? startTime.toISOString() : 'null'}`);
+      
+      if (startTime) {
+        // Calculate end time
+        endTime = calculateEndTime(
+          startTime,
+          classified.endTime,
+          classified.duration,
+          timezone
+        );
+        console.log(`⏱️ Parsed endTime: ${endTime ? endTime.toISOString() : 'null'}`);
+      }
+    } else {
+      console.warn('⚠️ No date or time extracted by AI');
+    }
+
+    // ✅ Step 4: Extract Email
+    const clientEmail = extractEmail(transcript);
+    console.log(`📧 Email: ${clientEmail || 'none'}`);
+
+    // ✅ Step 5: Detect Client Booking
+    const isClientBooking = detectClientBooking(transcript, classified.person);
+    const clientName = isClientBooking ? classified.person : null;
+    console.log(`👤 Client: ${clientName || 'none'}, Booking: ${isClientBooking}`);
+
+    // ✅ Step 6: Build Item Data
     const itemData = {
       userId: req.user._id,
-      type: parsed.type || 'Note',
-      title: parsed.title || transcript.slice(0, 60),
-      content: parsed.content || transcript,
-      startTime: parsed.startTime || null,
-      endTime: parsed.endTime || null,
+      type: classified.type || 'Note',
+      title: classified.title || transcript.slice(0, 60),
+      content: transcript,
+      startTime: startTime || null,
+      endTime: endTime || null,
       status: 'active',
       priority: req.body.priority || 'medium',
       category: req.body.category || 'General',
-      isClientBooking: parsed.isClientBooking || false,
-      clientName: parsed.clientName || null,
-      clientEmail: parsed.clientEmail || null,
+      isClientBooking: isClientBooking && clientName !== null,
+      clientName: clientName,
+      clientEmail: clientEmail,
+      repeat: classified.repeat || 'none',
+      location: classified.location || null,
     };
 
-    // ✅ Phase 2: Add subtasks if Task with multiple items
-    if (parsed.type === 'Task' && parsed.subtasks?.length > 0) {
-      itemData.subtasks = parsed.subtasks.map(text => ({ text, done: false }));
-      console.log('✅ Subtasks added:', itemData.subtasks.length);
+    console.log(`📦 Final item data:`, JSON.stringify(itemData, null, 2));
+
+    // ✅ Step 7: Add subtasks if Task
+    if (classified.type === 'Task' && classified.subtasks?.length > 0) {
+      itemData.subtasks = classified.subtasks.map(text => ({ text, done: false }));
     }
 
+    // ✅ Step 8: Create and Save Item
     const item = new Item(itemData);
     const savedItem = await item.save();
 
-    // ✅ Generate video link if client booking
+    console.log(`✅ Item created: ${savedItem._id}`);
+    console.log(`📅 StartTime saved: ${savedItem.startTime}`);
+
+    // ✅ Step 9: Generate video link if client booking
     if (savedItem.isClientBooking && savedItem.type === 'Event') {
       savedItem.videoCallLink = `https://meet.jit.si/SayNote-${savedItem._id}`;
       await savedItem.save();
-      console.log('✅ Video call link generated:', savedItem.videoCallLink);
+      console.log('✅ Video link generated');
     }
 
-    // ✅ Phase 1: Auto-create linked Event for Reminders with time
-    let linkedItem = null;
-    if (savedItem.type === 'Reminder' && savedItem.startTime) {
-      const eventEnd = new Date(savedItem.startTime);
-      eventEnd.setHours(eventEnd.getHours() + 1);
-
-      linkedItem = new Item({
-        userId: req.user._id,
-        type: 'Event',
-        title: savedItem.title,
-        content: savedItem.content,
-        startTime: savedItem.startTime,
-        endTime: eventEnd,
-        status: 'active',
-        category: savedItem.category,
-        linkedReminderId: savedItem._id,
-      });
-      await linkedItem.save();
-
-      // ✅ Sync linked Event with Google Calendar
-      try {
-        const gcalResponse = await syncWithGoogleCalendar(linkedItem);
-        linkedItem.googleEventId = gcalResponse.googleEventId;
-        linkedItem.isSynced = true;
-        await linkedItem.save();
-        console.log('✅ Linked event synced with Google Calendar');
-      } catch (gcalError) {
-        console.warn('⚠️ Google Calendar sync failed for linked event:', gcalError.message);
-      }
-
-      savedItem.linkedEventId = linkedItem._id;
-      await savedItem.save();
-
-      console.log('✅ Linked calendar event created:', linkedItem._id);
-    }
-
-    console.log('✅ Item created from voice:', savedItem._id);
-    console.log('📌 Type:', savedItem.type);
-    console.log('📌 Client booking:', savedItem.isClientBooking ? 'YES' : 'NO');
-    console.log('📌 Subtasks:', savedItem.subtasks?.length || 0);
-    console.log('📅 Final startTime (UTC):', savedItem.startTime);
-
-    res.status(201).json({
+    // ✅ Step 10: Return Response
+    return res.status(201).json({
       success: true,
       message: 'Voice processed successfully',
       transcript,
-      parsed: {
-        type: parsed.type,
-        title: parsed.title,
-        startTime: parsed.startTime,
-        endTime: parsed.endTime,
-        isClientBooking: parsed.isClientBooking,
-        clientName: parsed.clientName,
-        clientEmail: parsed.clientEmail,
-        subtasks: parsed.subtasks || [],
-      },
       item: savedItem,
-      linkedItem: linkedItem,
     });
+
   } catch (error) {
     console.error('❌ Voice processing error:', error);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
       message: 'Failed to process voice input',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      errorCode: 'INTERNAL_ERROR',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
 };
 
 /**
- * Transcribe audio only (without creating item)
+ * Transcribe audio only
  */
 export const transcribeOnly = async (req, res) => {
   try {
     if (!req.user) {
-      return res.status(401).json({ message: 'User not authenticated' });
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
     }
 
     if (!req.file) {
-      return res.status(400).json({ message: 'No audio file provided' });
+      return res.status(400).json({
+        success: false,
+        message: 'No audio file provided',
+        errorCode: 'MISSING_AUDIO',
+      });
     }
 
     if (!isGroqAvailable()) {
-      return res.status(503).json({ 
+      return res.status(503).json({
         success: false,
-        message: 'Voice service unavailable. Please check GROQ_API_KEY configuration.' 
+        message: 'Voice service unavailable',
+        errorCode: 'SERVICE_UNAVAILABLE',
       });
     }
 
-    const transcript = await transcribeAudioWithGroq(
-      req.file.buffer,
-      req.file.mimetype
-    );
-
-    if (!transcript || transcript.trim().length === 0) {
-      return res.status(400).json({ 
+    const transcription = await transcribeAudioWithGroq(req.file.buffer, req.file.mimetype);
+    if (!transcription.success) {
+      return res.status(400).json({
         success: false,
-        message: 'No speech detected. Please try again.' 
+        message: transcription.message,
+        errorCode: transcription.error,
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      transcript,
+      transcript: transcription.transcript,
     });
+
   } catch (error) {
     console.error('❌ Transcription error:', error);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
       message: 'Failed to transcribe audio',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      errorCode: 'INTERNAL_ERROR',
     });
   }
 };
 
 /**
- * Parse text with AI (without transcription)
+ * Parse text with AI
  */
 export const parseText = async (req, res) => {
   try {
     if (!req.user) {
-      return res.status(401).json({ message: 'User not authenticated' });
-    }
-
-    const { text, timezone } = req.body;
-
-    if (!text || text.trim().length === 0) {
-      return res.status(400).json({ 
+      return res.status(401).json({
         success: false,
-        message: 'Text is required' 
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
       });
     }
 
-    const parsed = await aiParsingService(text, {
-      timezone: timezone || 'UTC',
-      now: new Date(),
-    });
+    const { text, timezone } = req.body;
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Text is required',
+        errorCode: 'MISSING_TEXT',
+      });
+    }
 
-    console.log('🤖 Parsed result:', parsed);
+    if (!isGroqAvailable()) {
+      return res.status(503).json({
+        success: false,
+        message: 'AI service unavailable',
+        errorCode: 'SERVICE_UNAVAILABLE',
+      });
+    }
 
-    res.status(200).json({
+    const classified = await aiParsingService(text);
+    return res.status(200).json({
       success: true,
-      parsed,
+      parsed: classified,
     });
+
   } catch (error) {
     console.error('❌ Parse error:', error);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
       message: 'Failed to parse text',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      errorCode: 'INTERNAL_ERROR',
     });
   }
 };

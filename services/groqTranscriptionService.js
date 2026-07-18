@@ -1,20 +1,33 @@
 import Groq from 'groq-sdk';
+import { toFile } from 'groq-sdk';
 
-// ✅ Initialize Groq with better error handling
+// ✅ Constants
+const TRANSCRIPTION_MODEL = process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo';
+const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25MB
+const TIMEOUT_MS = 30000; // 30 seconds
+
+// ✅ Supported MIME types
+const SUPPORTED_MIME_TYPES = [
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/mp4',
+  'audio/m4a',
+  'audio/wav',
+  'audio/webm',
+  'audio/ogg',
+  'audio/aac',
+  'audio/flac',
+];
+
 let groq = null;
 let isGroqInitialized = false;
 
 try {
-  // ✅ Check if API key exists
   if (!process.env.GROQ_API_KEY) {
-    console.warn('⚠️ GROQ_API_KEY is not set in environment variables');
-    console.warn('📝 Voice features will not work without GROQ_API_KEY');
+    console.warn('⚠️ GROQ_API_KEY is not set');
+  } else if (!process.env.GROQ_API_KEY.startsWith('gsk_')) {
+    console.warn('⚠️ GROQ_API_KEY format is invalid. Should start with "gsk_"');
   } else {
-    // ✅ Validate API key format (gsk_ prefix)
-    if (!process.env.GROQ_API_KEY.startsWith('gsk_')) {
-      console.warn('⚠️ GROQ_API_KEY format looks incorrect. It should start with "gsk_"');
-    }
-    
     groq = new Groq({
       apiKey: process.env.GROQ_API_KEY,
     });
@@ -23,98 +36,128 @@ try {
   }
 } catch (error) {
   console.error('❌ Failed to initialize Groq:', error.message);
-  groq = null;
-  isGroqInitialized = false;
 }
 
-const TRANSCRIPTION_MODEL = process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo';
+/**
+ * Check if Groq is available
+ */
+export const isGroqAvailable = () => isGroqInitialized && !!groq;
+
+/**
+ * Validate audio file
+ */
+function validateAudio(audioBuffer, mimeType) {
+  if (!audioBuffer || audioBuffer.length === 0) {
+    return { valid: false, error: 'EMPTY_AUDIO', message: 'Audio file is empty' };
+  }
+
+  if (audioBuffer.length > MAX_AUDIO_SIZE) {
+    return { valid: false, error: 'FILE_TOO_LARGE', message: `Audio exceeds ${MAX_AUDIO_SIZE / 1024 / 1024}MB limit` };
+  }
+
+  if (!mimeType || !SUPPORTED_MIME_TYPES.includes(mimeType)) {
+    return { 
+      valid: false, 
+      error: 'UNSUPPORTED_MIME_TYPE', 
+      message: `Unsupported file type: ${mimeType}. Supported: ${SUPPORTED_MIME_TYPES.join(', ')}` 
+    };
+  }
+
+  return { valid: true };
+}
 
 /**
  * Transcribe audio using Groq's Whisper API
- * @param {Buffer} audioBuffer - Audio file buffer
- * @param {string} mimeType - MIME type of the audio file
- * @returns {Promise<string>} - Transcribed text
  */
 export const transcribeAudioWithGroq = async (audioBuffer, mimeType) => {
+  // ✅ Check availability
+  if (!isGroqAvailable()) {
+    return {
+      success: false,
+      error: 'SERVICE_UNAVAILABLE',
+      message: 'Groq transcription service is not available. Please check GROQ_API_KEY configuration.',
+    };
+  }
+
+  // ✅ Validate audio
+  const validation = validateAudio(audioBuffer, mimeType);
+  if (!validation.valid) {
+    return { success: false, ...validation };
+  }
+
+  console.log('🎤 Starting transcription...');
+  console.log(`📁 Size: ${(audioBuffer.length / 1024).toFixed(0)}KB, Type: ${mimeType}`);
+
   try {
-    // ✅ Check if Groq is initialized
-    if (!isGroqInitialized || !groq) {
-      console.error('❌ Groq not initialized. Please check GROQ_API_KEY.');
-      throw new Error('Groq service not available. Please check GROQ_API_KEY in .env');
-    }
-
-    console.log('🎤 Starting Groq transcription...');
-    console.log('📁 Audio size:', audioBuffer.length, 'bytes');
-    console.log('📁 MIME type:', mimeType);
-    console.log('🤖 Using model:', TRANSCRIPTION_MODEL);
-
-    // ✅ Create File object from buffer
+    // ✅ Prepare file
     const fileExtension = mimeType?.split('/')[1] || 'm4a';
-    const fileName = `recording.${fileExtension}`;
-    
-    const file = new File(
-      [audioBuffer],
-      fileName,
-      { type: mimeType || 'audio/mp4' }
-    );
+    const fileName = `recording-${Date.now()}.${fileExtension}`;
+    const file = await toFile(audioBuffer, fileName, { type: mimeType });
+
+    // ✅ Transcribe with timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
     const response = await groq.audio.transcriptions.create({
-      file: file,
+      file,
       model: TRANSCRIPTION_MODEL,
       language: 'en',
       response_format: 'text',
+    }, {
+      signal: controller.signal,
     });
 
-    console.log('✅ Groq transcription complete!');
-    console.log('📝 Transcript:', response);
-    
-    return response;
+    clearTimeout(timeoutId);
+
+    const transcript = response.trim();
+
+    if (!transcript) {
+      return {
+        success: false,
+        error: 'NO_SPEECH_DETECTED',
+        message: 'No speech detected in the audio. Please try again.',
+      };
+    }
+
+    console.log(`✅ Transcription complete (${transcript.length} chars)`);
+    return { success: true, transcript };
+
   } catch (error) {
-    console.error('❌ Groq transcription error:', error);
-    throw new Error(`Groq transcription failed: ${error.message}`);
-  }
-};
+    // ✅ Handle specific errors
+    if (error.name === 'AbortError') {
+      return {
+        success: false,
+        error: 'TIMEOUT',
+        message: 'Transcription timed out. Please try again with a shorter recording.',
+      };
+    }
 
-/**
- * Transcribe audio and parse with AI
- * @param {Buffer} audioBuffer - Audio file buffer
- * @param {string} mimeType - MIME type of the audio file
- * @param {Object} options - Additional options
- * @returns {Promise<{transcript: string, parsed: Object}>}
- */
-export const transcribeAndParse = async (audioBuffer, mimeType, options = {}) => {
-  try {
-    // ✅ First, transcribe
-    const transcript = await transcribeAudioWithGroq(audioBuffer, mimeType);
-    console.log('📝 Transcript:', transcript);
+    if (error.status === 429) {
+      return {
+        success: false,
+        error: 'RATE_LIMITED',
+        message: 'Too many requests. Please wait a moment and try again.',
+      };
+    }
 
-    // ✅ Then, parse with AI (import dynamically to avoid circular dependency)
-    const { aiParsingService } = await import('./aiService.js');
-    const parsed = await aiParsingService(transcript, {
-      timezone: options.timezone || 'UTC',
-      now: options.now || new Date(),
-    });
+    if (error.status === 401 || error.status === 403) {
+      return {
+        success: false,
+        error: 'AUTH_FAILED',
+        message: 'Invalid Groq API key. Please check your configuration.',
+      };
+    }
 
+    console.error('❌ Transcription error:', error.message);
     return {
-      transcript,
-      parsed,
+      success: false,
+      error: 'TRANSCRIPTION_FAILED',
+      message: `Failed to transcribe audio: ${error.message}`,
     };
-  } catch (error) {
-    console.error('❌ Transcribe and parse error:', error.message);
-    throw error;
   }
-};
-
-/**
- * Check if Groq service is available
- * @returns {boolean}
- */
-export const isGroqAvailable = () => {
-  return isGroqInitialized && !!groq && !!process.env.GROQ_API_KEY;
 };
 
 export default {
   transcribeAudioWithGroq,
-  transcribeAndParse,
   isGroqAvailable,
 };

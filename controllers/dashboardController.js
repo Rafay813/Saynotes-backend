@@ -1,5 +1,24 @@
 import Item from '../models/Item.js';
 import { generateBriefingTextService } from '../services/aiService.js';
+import { DateTime } from 'luxon';
+
+/**
+ * Helper: Get timezone-aware day boundaries (same as itemController)
+ */
+function getDayBoundaries(timezone) {
+  const now = DateTime.now().setZone(timezone);
+  const today = now.startOf('day');
+  const tomorrow = today.plus({ days: 1 });
+  
+  const todayUTC = today.toUTC().toJSDate();
+  const tomorrowUTC = tomorrow.toUTC().toJSDate();
+  
+  console.log(`🌍 Dashboard Timezone: ${timezone}`);
+  console.log(`📅 UTC today: ${todayUTC.toISOString()}`);
+  console.log(`📅 UTC tomorrow: ${tomorrowUTC.toISOString()}`);
+  
+  return { todayUTC, tomorrowUTC };
+}
 
 /**
  * @desc    Get dashboard data with AI-generated summary
@@ -9,50 +28,120 @@ import { generateBriefingTextService } from '../services/aiService.js';
 export const getDashboard = async (req, res) => {
   try {
     if (!req.user) {
-      return res.status(401).json({ message: 'User not authenticated' });
+      return res.status(401).json({ 
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
     }
 
     const userId = req.user._id;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const now = new Date();
+    
+    // ✅ Get timezone from query params (sent from frontend)
+    const timezone = req.query.timezone || 'UTC';
+    const { todayUTC, tomorrowUTC } = getDayBoundaries(timezone);
+
+    // ✅ Get next week boundary
+    const nextWeek = new Date(todayUTC);
+    nextWeek.setDate(nextWeek.getDate() + 7);
+
+    // ✅ Base filter for active items (excludes expired)
+    const activeFilter = {
+      userId,
+      status: 'active',
+      $and: [
+        {
+          $or: [
+            { deleteAfter: null },
+            { deleteAfter: { $exists: false } },
+            { deleteAfter: { $gt: now } }
+          ]
+        }
+      ]
+    };
+
+    // ✅ Base filter for all active items (for stats)
+    const statsFilter = {
+      userId,
+      status: 'active',
+      $and: [
+        {
+          $or: [
+            { deleteAfter: null },
+            { deleteAfter: { $exists: false } },
+            { deleteAfter: { $gt: now } }
+          ]
+        }
+      ]
+    };
 
     // ✅ Get today's items (active items for today)
     const todayItems = await Item.find({
-      userId,
-      status: 'active',
+      ...activeFilter,
       $or: [
-        { startTime: { $gte: today, $lt: tomorrow } },
-        { createdAt: { $gte: today, $lt: tomorrow }, startTime: null }
+        { startTime: { $gte: todayUTC, $lt: tomorrowUTC } },
+        { startTime: null, createdAt: { $gte: todayUTC, $lt: tomorrowUTC } }
       ]
     }).sort({ startTime: 1 });
 
-    // ✅ Get stats
+    // ✅ Get stats - apply deleteAfter filter to all counts
     const stats = {
-      total: await Item.countDocuments({ userId, status: 'active' }),
-      tasks: await Item.countDocuments({ userId, type: 'Task', status: 'active' }),
-      events: await Item.countDocuments({ userId, type: 'Event', status: 'active' }),
-      notes: await Item.countDocuments({ userId, type: 'Note', status: 'active' }),
-      reminders: await Item.countDocuments({ userId, type: 'Reminder', status: 'active' }),
-      completed: await Item.countDocuments({ userId, status: 'completed' }),
-      expired: await Item.countDocuments({ userId, status: 'expired' }),
+      total: await Item.countDocuments(statsFilter),
+      tasks: await Item.countDocuments({ 
+        ...statsFilter, 
+        type: 'Task' 
+      }),
+      events: await Item.countDocuments({ 
+        ...statsFilter, 
+        type: 'Event' 
+      }),
+      notes: await Item.countDocuments({ 
+        ...statsFilter, 
+        type: 'Note' 
+      }),
+      reminders: await Item.countDocuments({ 
+        ...statsFilter, 
+        type: 'Reminder' 
+      }),
+      completed: await Item.countDocuments({ 
+        userId, 
+        status: 'completed',
+        $and: [
+          {
+            $or: [
+              { deleteAfter: null },
+              { deleteAfter: { $exists: false } },
+              { deleteAfter: { $gt: now } }
+            ]
+          }
+        ]
+      }),
+      expired: await Item.countDocuments({ 
+        userId, 
+        status: 'expired' 
+      }),
     };
 
     // ✅ Get upcoming items (next 7 days)
-    const nextWeek = new Date(today);
-    nextWeek.setDate(nextWeek.getDate() + 7);
-    
     const upcomingItems = await Item.find({
-      userId,
-      status: 'active',
-      startTime: { $gte: tomorrow, $lt: nextWeek }
+      ...activeFilter,
+      startTime: { $gte: tomorrowUTC, $lt: nextWeek }
     }).sort({ startTime: 1 }).limit(10);
 
     // ✅ Get recent completed items
     const recentCompleted = await Item.find({
       userId,
-      status: 'completed'
+      status: 'completed',
+      $and: [
+        {
+          $or: [
+            { deleteAfter: null },
+            { deleteAfter: { $exists: false } },
+            { deleteAfter: { $gt: now } }
+          ]
+        }
+      ]
     })
       .sort({ completedAt: -1 })
       .limit(5)
@@ -65,10 +154,7 @@ export const getDashboard = async (req, res) => {
         summary = await generateBriefingTextService(todayItems);
       } else {
         // Check if there are any active items
-        const hasActiveItems = await Item.countDocuments({ 
-          userId, 
-          status: 'active' 
-        });
+        const hasActiveItems = await Item.countDocuments(statsFilter);
         if (hasActiveItems > 0) {
           summary = `You have ${hasActiveItems} active items. None are scheduled for today.`;
         } else {
@@ -77,7 +163,6 @@ export const getDashboard = async (req, res) => {
       }
     } catch (aiError) {
       console.error('❌ AI summary generation failed:', aiError);
-      // Fallback summary
       summary = `You have ${todayItems.length} items scheduled for today.`;
     }
 
@@ -95,7 +180,8 @@ export const getDashboard = async (req, res) => {
     res.status(500).json({ 
       success: false,
       message: 'Server Error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      errorCode: 'INTERNAL_ERROR',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
 };
