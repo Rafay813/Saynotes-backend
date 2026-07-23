@@ -159,8 +159,9 @@ export const getItems = async (req, res) => {
 
     console.log('📥 Final query:', JSON.stringify(query, null, 2));
 
+    // ✅ PERFORMANCE OPTIMIZATION: Added .lean() to reduce Mongoose document overhead
     const [items, total] = await Promise.all([
-      Item.find(query).sort(sort).skip(skip).limit(limit),
+      Item.find(query).sort(sort).skip(skip).limit(limit).lean(),
       Item.countDocuments(query),
     ]);
 
@@ -203,7 +204,7 @@ export const getItem = async (req, res) => {
     const item = await Item.findOne({
       _id: req.params.id,
       userId: req.user._id,
-    });
+    }).lean();
 
     if (!item) {
       return res.status(404).json({
@@ -731,7 +732,7 @@ export const getExpiredItems = async (req, res) => {
       userId: req.user._id,
       status: 'expired',
       deletedAt: { $ne: null },
-    }).sort({ deletedAt: -1 });
+    }).sort({ deletedAt: -1 }).lean();
 
     return res.status(200).json({ success: true, items });
   } catch (error) {

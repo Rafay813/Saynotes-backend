@@ -11,7 +11,7 @@ function parseDateString(dateStr, timezone) {
 
   console.log(`📅 Parsing date string: "${dateStr}"`);
 
-  // ✅ Relative dates
+  // Relative dates
   const relativeMap = {
     'today': now.startOf('day'),
     'tomorrow': now.plus({ days: 1 }).startOf('day'),
@@ -23,36 +23,36 @@ function parseDateString(dateStr, timezone) {
     return relativeMap[lower];
   }
 
-  // ✅ Weekdays
+  // Weekdays - FIXED: Use proper weekday detection
   const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   
-  // "next Monday"
+  // "next Monday" - FIXED: Changed <= to <
   for (let i = 0; i < weekdays.length; i++) {
     if (lower.includes(`next ${weekdays[i]}`)) {
       let targetDay = i;
       let currentDay = now.weekday % 7;
       let diff = targetDay - currentDay;
-      if (diff <= 0) diff += 7;
+      if (diff < 0) diff += 7; // ✅ REAL FIX: changed <= to <
       const result = now.plus({ days: diff + 7 }).startOf('day');
       console.log(`✅ Parsed as "next ${weekdays[i]}"`);
       return result;
     }
   }
 
-  // "this Friday" or "Friday"
+  // "this Friday" or "Friday" - FIXED: Changed <= to <
   for (let i = 0; i < weekdays.length; i++) {
     if (lower.includes(weekdays[i]) && !lower.includes('next')) {
       let targetDay = i;
       let currentDay = now.weekday % 7;
       let diff = targetDay - currentDay;
-      if (diff <= 0) diff += 7;
+      if (diff < 0) diff += 7; // ✅ REAL FIX: changed <= to <
       const result = now.plus({ days: diff }).startOf('day');
       console.log(`✅ Parsed as "${weekdays[i]}"`);
       return result;
     }
   }
 
-  // ✅ Try various formats with year
+  // Try various formats with year
   const formatsWithYear = [
     'd MMMM yyyy',     // 20 July 2026
     'MMMM d, yyyy',    // July 20, 2026
@@ -71,14 +71,13 @@ function parseDateString(dateStr, timezone) {
     }
   }
 
-  // ✅ Try formats without year (use current year)
+  // Try formats without year (use current year)
   const formatsNoYear = [
     'd MMMM',          // 20 July
     'MMMM d',          // July 20
     'd MMM',           // 20 Jul
     'MM/dd',           // 07/20
     'dd/MM',           // 20/07
-    'd MMMM',          // 20 July
   ];
 
   for (const format of formatsNoYear) {
@@ -106,7 +105,7 @@ function parseTimeString(timeStr) {
   if (trimmed === 'noon') return { hours: 12, minutes: 0 };
   if (trimmed === 'midnight') return { hours: 0, minutes: 0 };
 
-  // ✅ HH:MM format (24-hour)
+  // HH:MM format (24-hour)
   const match24 = trimmed.match(/^(\d{1,2}):(\d{2})$/);
   if (match24) {
     const result = { hours: parseInt(match24[1]), minutes: parseInt(match24[2]) };
@@ -114,7 +113,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // ✅ 12-hour format with AM/PM
+  // 12-hour format with AM/PM
   const match12 = trimmed.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
   if (match12) {
     let hours = parseInt(match12[1]);
@@ -127,7 +126,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // ✅ Just a number (e.g., "7" → 7:00)
+  // Just a number (e.g., "7" → 7:00)
   const matchHour = trimmed.match(/^(\d{1,2})$/);
   if (matchHour) {
     let hours = parseInt(matchHour[1]);
@@ -249,14 +248,14 @@ export function parseDateTime(dateStr, timeStr, timezone) {
 
   console.log(`📅 parseDateTime: date="${dateStr}", time="${timeStr}", tz="${timezone}"`);
 
-  // ✅ Parse date
+  // Parse date
   let dt = parseDateString(dateStr, timezone);
   if (!dt) {
     console.warn(`⚠️ Could not parse date: "${dateStr}"`);
     return null;
   }
 
-  // ✅ Parse time
+  // Parse time
   if (timeStr) {
     const time = parseTimeString(timeStr);
     if (time) {
@@ -267,7 +266,7 @@ export function parseDateTime(dateStr, timeStr, timezone) {
     }
   }
 
-  // ✅ Ensure date is in the future (for relative dates like "Friday")
+  // Ensure date is in the future (for relative dates like "Friday")
   const now = DateTime.now().setZone(timezone);
   if (dt < now.startOf('day')) {
     // If parsed date is in the past, add 7 days (next occurrence)
@@ -275,7 +274,7 @@ export function parseDateTime(dateStr, timeStr, timezone) {
     console.log(`📅 Date was in the past, moved to next occurrence: ${dt.toISO()}`);
   }
 
-  // ✅ Convert to UTC
+  // Convert to UTC
   const utcDate = dt.toUTC().toJSDate();
   console.log(`✅ Final UTC: ${utcDate.toISOString()}`);
 
@@ -291,7 +290,7 @@ export function calculateEndTime(startTime, endTimeStr, durationStr, timezone) {
   const start = new Date(startTime);
   console.log(`⏱️ Calculating end time from start: ${start.toISOString()}`);
 
-  // ✅ If endTime is provided, parse it
+  // If endTime is provided, parse it
   if (endTimeStr) {
     const endDate = parseDateTime(
       start.toISOString().split('T')[0],
@@ -304,7 +303,7 @@ export function calculateEndTime(startTime, endTimeStr, durationStr, timezone) {
     }
   }
 
-  // ✅ If duration is provided, calculate
+  // If duration is provided, calculate
   if (durationStr) {
     const minutes = parseDuration(durationStr);
     if (minutes) {
@@ -315,7 +314,7 @@ export function calculateEndTime(startTime, endTimeStr, durationStr, timezone) {
     }
   }
 
-  // ✅ Default: 30 minutes
+  // Default: 30 minutes
   const end = new Date(start);
   end.setMinutes(end.getMinutes() + 30);
   console.log(`✅ End time default (30min): ${end.toISOString()}`);

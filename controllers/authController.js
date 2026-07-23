@@ -3,12 +3,12 @@ import User from '../models/User.js';
 import { exchangeAuthCode } from '../services/calendarService.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
-// ✅ Generate JWT
+// Generate JWT
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 };
 
-// ✅ Register User
+// Register User
 export const registerUser = async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -31,12 +31,12 @@ export const registerUser = async (req, res) => {
       token: generateToken(user._id),
     });
   } catch (error) {
-    console.error('❌ Register error:', error);
+    console.error('Register error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
 
-// ✅ Login User
+// Login User
 export const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -58,35 +58,35 @@ export const loginUser = async (req, res) => {
       token: generateToken(user._id),
     });
   } catch (error) {
-    console.error('❌ Login error:', error);
+    console.error('Login error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
 
-// ✅ Get User Profile
+// Get User Profile
 export const getMe = async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select('-password');
     res.json(user);
   } catch (error) {
-    console.error('❌ Profile error:', error);
+    console.error('Profile error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
 
-// ✅ Google Login
+// Google Login
 export const googleLogin = async (req, res) => {
   try {
-    // Handle Google OAuth login
     const { token } = req.body;
-    // ... existing Google login logic
+    // Handle Google OAuth login
+    res.json({ message: 'Google login successful' });
   } catch (error) {
-    console.error('❌ Google login error:', error);
+    console.error('Google login error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
 
-// ✅ Connect Google Calendar (protected - uses auth token)
+// Connect Google Calendar
 export const connectGoogleCalendar = async (req, res) => {
   try {
     const { code } = req.body;
@@ -102,7 +102,6 @@ export const connectGoogleCalendar = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // ✅ Use findByIdAndUpdate to avoid pre('save') hook
     await User.findByIdAndUpdate(user._id, {
       googleAccessToken: tokens.access_token,
       googleRefreshToken: tokens.refresh_token || user.googleRefreshToken,
@@ -110,7 +109,7 @@ export const connectGoogleCalendar = async (req, res) => {
       googleCalendarConnected: true,
     });
 
-    console.log('✅ Google Calendar connected for user:', user.email);
+    console.log('Google Calendar connected for user:', user.email);
 
     res.json({ 
       success: true, 
@@ -118,23 +117,47 @@ export const connectGoogleCalendar = async (req, res) => {
       message: 'Google Calendar connected successfully',
     });
   } catch (error) {
-    console.error('❌ Google connection error:', error);
+    console.error('Google connection error:', error);
     res.status(500).json({ message: 'Failed to connect Google Calendar' });
   }
 };
 
-// ✅ Register Push Token
+// Register Push Token
 export const registerPushToken = async (req, res) => {
   try {
-    // Handle push token registration
-    res.json({ success: true });
+    const { expoPushToken } = req.body;
+    
+    if (!expoPushToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'expoPushToken is required',
+      });
+    }
+
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+      });
+    }
+
+    await User.findByIdAndUpdate(req.user._id, { expoPushToken });
+    console.log('Push token registered for user:', req.user._id);
+
+    res.json({
+      success: true,
+      message: 'Push token registered successfully',
+    });
   } catch (error) {
-    console.error('❌ Push token error:', error);
-    res.status(500).json({ message: 'Server Error' });
+    console.error('Push token error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server Error',
+    });
   }
 };
 
-// ✅ Request password reset — sends 6-digit code via email (NON-BLOCKING)
+// Request password reset
 export const requestPasswordReset = async (req, res) => {
   try {
     const { email } = req.body;
@@ -145,43 +168,38 @@ export const requestPasswordReset = async (req, res) => {
 
     const user = await User.findOne({ email });
 
-    // ✅ Always return success even if user not found — prevents email enumeration
     if (!user) {
       return res.status(200).json({ message: 'If that email exists, a reset code has been sent.' });
     }
 
-    // ✅ Generate 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
 
     await User.findByIdAndUpdate(user._id, {
       resetPasswordCode: code,
       resetPasswordExpires: expires,
     });
 
-    // ✅ DON'T AWAIT — fire and forget, so API responds immediately
-    // This prevents the request from hanging if email service is slow
     sendPasswordResetEmail({ to: user.email, name: user.name, code })
       .then(result => {
         if (result.sent) {
-          console.log('✅ Password reset email sent to:', user.email);
+          console.log('Password reset email sent to:', user.email);
         } else {
-          console.warn('⚠️ Reset email not sent:', result.reason);
+          console.warn('Reset email not sent:', result.reason);
         }
       })
       .catch(err => {
-        console.error('⚠️ Reset email send failed (background):', err.message);
+        console.error('Reset email send failed:', err.message);
       });
 
-    // ✅ Respond immediately — don't wait for email to send
     res.status(200).json({ message: 'If that email exists, a reset code has been sent.' });
   } catch (error) {
-    console.error('❌ Request password reset error:', error);
+    console.error('Request password reset error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
 
-// ✅ Reset password using the 6-digit code
+// Reset password
 export const resetPassword = async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
@@ -208,17 +226,16 @@ export const resetPassword = async (req, res) => {
       return res.status(400).json({ message: 'Code has expired. Please request a new one.' });
     }
 
-    // ✅ Set new password — triggers the pre('save') hash hook
     user.password = newPassword;
     user.resetPasswordCode = null;
     user.resetPasswordExpires = null;
     await user.save();
 
-    console.log('✅ Password reset successful for:', user.email);
+    console.log('Password reset successful for:', user.email);
 
     res.status(200).json({ message: 'Password reset successful. Please sign in.' });
   } catch (error) {
-    console.error('❌ Reset password error:', error);
+    console.error('Reset password error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };

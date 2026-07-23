@@ -86,6 +86,7 @@ const itemSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
+  // ✅ Reminder → Event linking
   linkedEventId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Item',
@@ -96,6 +97,11 @@ const itemSchema = new mongoose.Schema({
     ref: 'Item',
     default: null,
   },
+  // ✅ IMPORTANT: Flag to identify linked events (was missing)
+  isLinkedEvent: {
+    type: Boolean,
+    default: false,
+  },
   subtasks: [{
     text: { type: String, required: true },
     done: { type: Boolean, default: false },
@@ -104,7 +110,7 @@ const itemSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// ✅ Helper function - can be imported from here
+// Helper function - can be imported from here
 export function computeDeleteAfter({ type, startTime, endTime }) {
   const now = new Date();
   
@@ -125,13 +131,12 @@ export function computeDeleteAfter({ type, startTime, endTime }) {
   return d;
 }
 
-// ✅ NO middleware here - we'll handle deleteAfter in controllers
-
-// ✅ Indexes for performance
+// Indexes for performance
 itemSchema.index({ userId: 1, type: 1, status: 1 });
 itemSchema.index({ userId: 1, startTime: 1 });
 itemSchema.index({ userId: 1, createdAt: -1 });
 itemSchema.index({ deleteAfter: 1 });
+itemSchema.index({ userId: 1, isLinkedEvent: 1 }); // ✅ Added index for linked event queries
 
 const Item = mongoose.model('Item', itemSchema);
 
