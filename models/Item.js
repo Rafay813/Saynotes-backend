@@ -86,7 +86,6 @@ const itemSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
-  // Reminder → Event linking
   linkedEventId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Item',
@@ -113,14 +112,14 @@ const itemSchema = new mongoose.Schema({
 export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
   const now = new Date();
   
-  // ✅ For Notes: keep forever (or 30 days)
+  // ✅ For Notes: keep 30 days
   if (type === 'Note') {
     const d = new Date(now);
     d.setDate(d.getDate() + 30);
     return d;
   }
   
-  // ✅ For Tasks: keep forever (or 30 days)
+  // ✅ For Tasks: keep 30 days
   if (type === 'Task') {
     const d = new Date(now);
     d.setDate(d.getDate() + 30);
@@ -163,8 +162,8 @@ export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
   return d;
 }
 
-// ✅ Pre-save middleware to auto-calculate deleteAfter
-itemSchema.pre('save', function(next) {
+// ✅ FIXED: Pre-save middleware - removed 'next' parameter and used function()
+itemSchema.pre('save', function() {
   // Only calculate if not explicitly set
   if (this.deleteAfter === undefined || this.deleteAfter === null) {
     this.deleteAfter = computeDeleteAfter({
@@ -174,7 +173,6 @@ itemSchema.pre('save', function(next) {
       createdAt: this.createdAt || new Date(),
     });
   }
-  next();
 });
 
 // Indexes for performance
@@ -184,6 +182,7 @@ itemSchema.index({ userId: 1, createdAt: -1 });
 itemSchema.index({ deleteAfter: 1 });
 itemSchema.index({ userId: 1, isLinkedEvent: 1 });
 
-const Item = mongoose.model('Item', itemSchema);
+// ✅ Safe model loading
+const Item = mongoose.models.Item || mongoose.model('Item', itemSchema);
 
 export default Item;
