@@ -391,22 +391,32 @@ export const updateItem = async (req, res) => {
       item.completedAt = null;
     }
 
-    // ✅ Google Calendar sync (non-blocking)
-    if (item.type === 'Event' && item.status === 'active') {
-      try {
-        const gcalResponse = await syncWithGoogleCalendar(item);
-        item.googleEventId = gcalResponse.googleEventId;
-        item.isSynced = true;
-      } catch (gcalError) {
-        console.warn('⚠️ Google Calendar sync failed:', gcalError.message);
-      }
-    }
-
+    // ✅ Save and respond immediately — don't block on Google Calendar
     const updatedItem = await item.save();
     console.log('✅ Item updated:', updatedItem._id);
     console.log('📅 Delete after recalculated:', updatedItem.deleteAfter);
 
-    return res.status(200).json({ success: true, item: updatedItem });
+    // Send response immediately
+    res.status(200).json({ success: true, item: updatedItem });
+
+    // ✅ Sync to Google Calendar in the background, after the response is already sent
+    if (updatedItem.type === 'Event' && updatedItem.status === 'active') {
+      (async () => {
+        try {
+          const gcalResponse = await syncWithGoogleCalendar(updatedItem);
+          if (gcalResponse && gcalResponse.googleEventId) {
+            updatedItem.googleEventId = gcalResponse.googleEventId;
+            updatedItem.isSynced = true;
+            await updatedItem.save();
+            console.log('✅ Google Calendar synced (background):', gcalResponse);
+          }
+        } catch (gcalError) {
+          console.warn('⚠️ Google Calendar sync failed (non-fatal, background):', gcalError.message);
+        }
+      })();
+    }
+
+    return;
   } catch (error) {
     console.error('❌ Update item error:', error);
     return res.status(500).json({
@@ -609,23 +619,34 @@ export const confirmItem = async (req, res) => {
       console.log('📅 StartTime after confirm:', item.startTime);
       console.log('📅 EndTime after confirm:', item.endTime);
 
-      if (item.type === 'Event') {
-        try {
-          const gcalResponse = await syncWithGoogleCalendar(item);
-          item.googleEventId = gcalResponse.googleEventId;
-          item.isSynced = true;
-        } catch (gcalError) {
-          console.warn('⚠️ Google Calendar sync failed:', gcalError.message);
-        }
-      }
-
+      // ✅ Save and respond immediately — don't block the response on Google Calendar
       const updatedItem = await item.save();
 
       console.log('✅ Item confirmed:', updatedItem._id, 'Type:', updatedItem.type, 'Status:', updatedItem.status);
       console.log('📅 Final startTime:', updatedItem.startTime);
       console.log('📅 Final endTime:', updatedItem.endTime);
-      
-      return res.status(200).json({ success: true, item: updatedItem });
+
+      // Send response immediately
+      res.status(200).json({ success: true, item: updatedItem });
+
+      // ✅ Sync to Google Calendar in the background, after the response is already sent
+      if (updatedItem.type === 'Event') {
+        (async () => {
+          try {
+            const gcalResponse = await syncWithGoogleCalendar(updatedItem);
+            if (gcalResponse && gcalResponse.googleEventId) {
+              updatedItem.googleEventId = gcalResponse.googleEventId;
+              updatedItem.isSynced = true;
+              await updatedItem.save();
+              console.log('✅ Google Calendar synced (background):', gcalResponse);
+            }
+          } catch (gcalError) {
+            console.warn('⚠️ Google Calendar sync failed (non-fatal, background):', gcalError.message);
+          }
+        })();
+      }
+
+      return;
     }
 
     return res.status(400).json({
