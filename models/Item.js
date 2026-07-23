@@ -108,25 +108,22 @@ const itemSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// ✅ Helper function - computes deleteAfter based on item type and dates
+// Helper function - computes deleteAfter based on item type and dates
 export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
   const now = new Date();
   
-  // ✅ For Notes: keep 30 days
   if (type === 'Note') {
     const d = new Date(now);
     d.setDate(d.getDate() + 30);
     return d;
   }
   
-  // ✅ For Tasks: keep 30 days
   if (type === 'Task') {
     const d = new Date(now);
     d.setDate(d.getDate() + 30);
     return d;
   }
   
-  // ✅ For Reminders: keep 7 days after reminder date or 30 days from creation
   if (type === 'Reminder') {
     if (startTime) {
       const d = new Date(startTime);
@@ -138,7 +135,6 @@ export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
     return d;
   }
   
-  // ✅ For Events: keep 7 days after the event ends
   if (type === 'Event') {
     if (endTime) {
       const d = new Date(endTime);
@@ -150,21 +146,18 @@ export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
       d.setDate(d.getDate() + 7);
       return d;
     }
-    // If no startTime, keep 30 days from creation
     const d = new Date(now);
     d.setDate(d.getDate() + 30);
     return d;
   }
   
-  // Default: keep 30 days
   const d = new Date(now);
   d.setDate(d.getDate() + 30);
   return d;
 }
 
-// ✅ FIXED: Pre-save middleware - removed 'next' parameter and used function()
+// Pre-save middleware - no 'next' parameter
 itemSchema.pre('save', function() {
-  // Only calculate if not explicitly set
   if (this.deleteAfter === undefined || this.deleteAfter === null) {
     this.deleteAfter = computeDeleteAfter({
       type: this.type,
@@ -175,14 +168,16 @@ itemSchema.pre('save', function() {
   }
 });
 
-// Indexes for performance
+// ✅ Indexes for performance - including compound index
 itemSchema.index({ userId: 1, type: 1, status: 1 });
 itemSchema.index({ userId: 1, startTime: 1 });
 itemSchema.index({ userId: 1, createdAt: -1 });
 itemSchema.index({ deleteAfter: 1 });
 itemSchema.index({ userId: 1, isLinkedEvent: 1 });
+// ✅ Compound index for dashboard queries
+itemSchema.index({ userId: 1, status: 1, startTime: 1 });
 
-// ✅ Safe model loading
+// Safe model loading
 const Item = mongoose.models.Item || mongoose.model('Item', itemSchema);
 
 export default Item;

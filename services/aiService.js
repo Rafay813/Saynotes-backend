@@ -3,6 +3,7 @@ import Groq from 'groq-sdk';
 // Constants
 const AI_MODEL = process.env.GROQ_AI_MODEL || 'llama-3.3-70b-versatile';
 
+// ✅ Singleton Groq client
 let groq = null;
 let isGroqInitialized = false;
 
@@ -27,83 +28,53 @@ try {
 
 export const isGroqAvailable = () => isGroqInitialized && !!groq;
 
-/**
- * ✅ Word-safe truncation - never cuts off mid-word
- */
-function truncateAtWord(text, maxChars = 80) {
-  if (!text) return '';
-  if (text.length <= maxChars) return text;
-  const truncated = text.slice(0, maxChars);
-  const lastSpace = truncated.lastIndexOf(' ');
-  return lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
-}
+// ✅ SYSTEM_PROMPT - AI extracts ONLY metadata, NO title generation
+const SYSTEM_PROMPT = `You are NOT a chatbot. You are an information extractor.
 
-function buildSystemPrompt() {
-  return `You are an intent classifier for a voice note app. Extract information from the user's transcript.
+Return ONLY valid JSON. No explanations. No markdown. Never apologize. Never add extra text.
 
-CRITICAL: You MUST extract the date and time if mentioned. Pay special attention to phrases like "at 7 pm", "tomorrow at 2 PM", "July 20 at 7pm".
+Extract these fields from the user's transcript:
+- type: "Note", "Task", "Reminder", or "Event"
+- date: the date mentioned (e.g., "today", "tomorrow", "July 20", "next Friday") or null
+- time: the time mentioned (e.g., "7 PM", "2:30 PM", "14:00") or null
+- endTime: end time if mentioned (e.g., "5 PM") or null
+- duration: duration if mentioned (e.g., "1 hour", "30 minutes") or null
+- person: name of a person if mentioned or null
+- repeat: if mentioned (e.g., "daily", "weekly") or null
+- location: if mentioned (e.g., "Zoom", "Office") or null
+- items: array of items (for shopping/task lists) or empty array
+- subtasks: array of subtasks (for tasks) or empty array
 
-TITLE RULES — READ CAREFULLY:
-The title is the ONLY thing the user sees at a glance in their list. If you drop a name, place, or specific detail from the title, the user loses that information unless they open the item and re-read the full transcript. This is a failure mode you must actively avoid.
+DO NOT generate a title. The title will be created by the system.
 
-- NEVER compress to a generic label like "Send invite", "Client meeting", "Call reminder", "Buy groceries", "Team meeting", "Doctor appointment". These are all FAILURES even if technically accurate — they throw away the specific who/what/where that made the voice note useful in the first place.
-- ALWAYS retain: names of people, names of places/organizations, specific numbers, specific subjects/topics, and relative timeframes (e.g. "next week", "on Friday") when they were said.
-- Word count is a soft guide, not a hard ceiling. Prefer concise (aim for under 15 words), but if preserving a critical detail requires going to 18-20 words, do that — never sacrifice a name/place/date to hit a shorter count.
-- Do NOT restate the exact clock time in the title if it's already being extracted separately into the "time" field, UNLESS omitting it would make the title ambiguous or less natural.
+Classification rules:
+- "Event": meetings, appointments, calls with a specific time and another person
+- "Reminder": something to be reminded of at a specific time, often personal
+- "Task": something to get done, may or may not have a deadline
+- "Note": general thoughts, ideas, or information with no action/time
 
-More examples of BAD (generic) -> GOOD (specific) titles:
-- BAD: "Client meeting" -> GOOD: "Meeting with Sarah about Q3 budget proposal"
-- BAD: "Send invite" -> GOOD: "Send calendar invite to The Clinic for next week"
-- BAD: "Doctor appointment" -> GOOD: "Dentist appointment with Dr. Ahmed at City Hospital"
-- BAD: "Call reminder" -> GOOD: "Call John about the apartment lease"
-- BAD: "Buy groceries" -> GOOD: "Buy milk, eggs and bread after work"
-- BAD: "Team meeting" -> GOOD: "Team stand-up tomorrow at 9:00 AM"
-- BAD: "Follow up" -> GOOD: "Follow up with Ahmad about the SayNote invoice"
-
-Additional extraction rules:
-- title: max ~20 words, must preserve every concrete detail from the transcript — names, places, organizations, specific dates/times/timeframes. See TITLE RULES above.
-- date: the date mentioned (e.g., "today", "tomorrow", "July 20", "20 July 2026", "next Friday") - CRITICAL if date is mentioned
-- time: the time mentioned (e.g., "7 PM", "7pm", "2:30 PM", "14:00") - CRITICAL if time is mentioned
-- endTime: end time if mentioned (e.g., "5 PM")
-- duration: duration if mentioned (e.g., "1 hour", "30 minutes")
-- person: name of a person if mentioned
-- repeat: if mentioned (e.g., "daily", "weekly")
-- location: if mentioned (e.g., "Zoom", "Office")
-- subtasks: array of strings if multiple actions (only for Task type)
-
-Classify the transcript into exactly one of these types:
-- "Note" - Information with NO action and NO time
-- "Task" - Something the user needs to DO
-- "Reminder" - A prompt tied to a specific time
-- "Event" - A calendar occurrence with a start time
-
-IMPORTANT RULES:
-1. If user says "at 7 pm" → time: "7 PM", date: null (if no date mentioned)
-2. If user says "tomorrow at 7 pm" → date: "tomorrow", time: "7 PM"
-3. If user says "July 20 at 7pm" → date: "July 20", time: "7 PM"
-4. If user says "Call mom at 9 PM" → title: "Call mom at 9 PM", time: "9 PM", date: null
-5. If user says "Buy milk and eggs" → type: "Task", title: "Buy milk and eggs", subtasks: ["milk", "eggs"], date: null, time: null
-6. If user says "Meeting with James at 3pm" → type: "Event", title: "Meeting with James at 3pm", time: "3 PM", person: "James"
-
-Return ONLY valid JSON. No explanations, no markdown.
+Date/time rules:
+- "at 7 pm" → time: "7 PM"
+- "tomorrow at 7 pm" → date: "tomorrow", time: "7 PM"
+- "July 20 at 7pm" → date: "July 20", time: "7 PM"
+- "Call mom at 9 PM" → time: "9 PM", person: "mom"
+- "Buy milk and eggs" → items: ["milk", "eggs"]
 
 Examples:
-{"type":"Event","title":"Meeting with James","date":"tomorrow","time":"7 PM","person":"James"}
-{"type":"Event","title":"Meeting with James at 7 PM","date":"20 July 2026","time":"7 PM","person":"James"}
-{"type":"Reminder","title":"Call John on Friday","date":"today","time":"2 PM","person":"John"}
-{"type":"Reminder","title":"Call mom at 9 PM","date":null,"time":"9 PM","person":"mom"}
-{"type":"Task","title":"Buy milk and eggs","date":null,"time":null,"person":null,"subtasks":["milk","eggs","bread"]}
-{"type":"Note","title":"AI idea about project","date":null,"time":null,"person":null}`;
-}
+{"type":"Event","person":"James","date":"tomorrow","time":"7 PM"}
+{"type":"Event","person":"James","date":"20 July 2026","time":"7 PM","location":"Zoom"}
+{"type":"Reminder","person":"John","date":"today","time":"2 PM"}
+{"type":"Reminder","person":"mom","time":"9 PM"}
+{"type":"Task","items":["milk","eggs","bread"]}
+{"type":"Task","subtasks":["research","write","submit"]}
+{"type":"Note"}`;
 
 function extractJSON(content) {
-  // Try markdown code block
   const markdownMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
   if (markdownMatch) {
     return markdownMatch[1];
   }
 
-  // Try finding { ... }
   const start = content.indexOf('{');
   const end = content.lastIndexOf('}');
   if (start !== -1 && end !== -1 && start < end) {
@@ -113,12 +84,139 @@ function extractJSON(content) {
   return null;
 }
 
+/**
+ * ✅ Format date for title display
+ */
+function formatDateForTitle(dateStr) {
+  if (!dateStr) return null;
+  
+  // Check if it's a relative date
+  const relativeMap = {
+    'today': 'Today',
+    'tomorrow': 'Tomorrow',
+    'yesterday': 'Yesterday',
+  };
+  
+  if (relativeMap[dateStr.toLowerCase()]) {
+    return relativeMap[dateStr.toLowerCase()];
+  }
+  
+  // Clean ordinal suffixes for display
+  const cleanDate = dateStr.replace(/(\d+)(st|nd|rd|th)/, '$1');
+  
+  // Format: "27 July 2026" -> keep as is
+  // If it has a year, keep it, otherwise just the date
+  return cleanDate;
+}
+
+/**
+ * ✅ Generate deterministic title from parsed data
+ * Includes date in title ONLY when a specific date with year is mentioned
+ */
+function generateTitle(parsed, transcript) {
+  const { type, person, items, subtasks, date, location } = parsed;
+  
+  // Remove filler words from transcript for fallback
+  const fillerWords = ['um', 'uh', 'actually', 'basically', 'like', 'please', 'you know', 'i mean'];
+  const cleanTranscript = transcript
+    .split(/\s+/)
+    .filter(w => w.length > 0 && !fillerWords.includes(w.toLowerCase()))
+    .join(' ');
+  
+  let title = '';
+  
+  switch (type) {
+    case 'Event':
+      if (person) title = `Meeting with ${person}`;
+      else if (location) title = `Event at ${location}`;
+      else title = 'Meeting';
+      break;
+
+    case 'Reminder':
+      if (person) title = `Call ${person}`;
+      else if (location) title = `Reminder at ${location}`;
+      else title = 'Reminder';
+      break;
+
+    case 'Task':
+      if (items && items.length > 0) {
+        const first = items[0];
+        const count = items.length;
+        title = count === 1 ? `Buy ${first}` : `Buy ${first} + ${count - 1} more`;
+      } else if (subtasks && subtasks.length > 0) {
+        const first = subtasks[0];
+        const count = subtasks.length;
+        title = count === 1 ? `Complete ${first}` : `Complete ${first} + ${count - 1} more`;
+      } else {
+        title = 'Task';
+      }
+      break;
+
+    case 'Note':
+    default: {
+      const words = cleanTranscript.split(/\s+/).filter(w => w.length > 0);
+      if (words.length === 0) return 'Note';
+      
+      const titleWords = words.slice(0, 5);
+      title = titleWords.join(' ');
+      title = title.charAt(0).toUpperCase() + title.slice(1);
+      
+      if (words.length > 5) {
+        title += '...';
+      }
+      return title || 'Note';
+    }
+  }
+  
+  // ✅ Add date to title ONLY if it's a specific date with year
+  if (date) {
+    // Check if date contains a year (4-digit number)
+    const hasYear = /\b(19|20)\d{2}\b/.test(date);
+    
+    // Only add date if it has a year (specific date)
+    if (hasYear) {
+      const formattedDate = formatDateForTitle(date);
+      if (formattedDate) {
+        // Clean ordinal suffixes for display
+        const cleanDate = formattedDate.replace(/(\d+)(st|nd|rd|th)/, '$1');
+        title += ` (${cleanDate})`;
+      }
+    }
+  }
+  
+  return title;
+}
+
+/**
+ * ✅ Clean title - safety net for any date/time that might slip through
+ */
+function cleanTitle(title) {
+  if (!title) return 'Note';
+  
+  let cleaned = title.trim();
+  
+  // Remove time patterns only (keep date if present)
+  cleaned = cleaned.replace(/\b\d{1,2}(?::\d{2})?\s?(?:am|pm)\b/gi, '');
+  cleaned = cleaned.replace(/\bat\s+\d{1,2}\s*(?:am|pm)?/gi, '');
+  
+  // Clean up extra spaces
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  // Capitalize first letter
+  if (cleaned.length > 0) {
+    cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+  
+  return cleaned || 'Note';
+}
+
 export const aiParsingService = async (transcript) => {
-  // ✅ Fallback uses word-safe truncation
+  const trimmedTranscript = transcript.trim();
+  
+  // ✅ Fallback - no AI, just metadata extraction
   const fallback = {
     type: 'Note',
-    title: truncateAtWord(transcript, 80),
-    content: transcript,
+    title: generateTitle({ type: 'Note' }, trimmedTranscript),
     date: null,
     time: null,
     endTime: null,
@@ -126,6 +224,7 @@ export const aiParsingService = async (transcript) => {
     repeat: null,
     location: null,
     person: null,
+    items: [],
     subtasks: [],
   };
 
@@ -134,17 +233,18 @@ export const aiParsingService = async (transcript) => {
     return fallback;
   }
 
-  console.log('🤖 Classifying transcript:', transcript);
+  console.log('🤖 Extracting metadata from:', trimmedTranscript);
 
   try {
     const response = await groq.chat.completions.create({
       model: AI_MODEL,
       messages: [
-        { role: 'system', content: buildSystemPrompt() },
-        { role: 'user', content: `Transcript: "${transcript}"` },
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: `Transcript: "${trimmedTranscript}"` },
       ],
-      temperature: 0.1,
-      max_tokens: 350,
+      temperature: 0,
+      top_p: 1,
+      max_tokens: 200,
       response_format: { type: 'json_object' },
     });
 
@@ -160,41 +260,14 @@ export const aiParsingService = async (transcript) => {
     const parsed = JSON.parse(jsonString);
     console.log('✅ Parsed AI result:', JSON.stringify(parsed, null, 2));
 
-    let title = parsed.title || truncateAtWord(transcript, 80);
-    const transcriptWordCount = transcript.split(/\s+/).length;
-
-    // ✅ For short transcripts (<=15 words), always use the full transcript as the title.
-    // The AI is unreliable at preserving every name/place/detail when compressing short
-    // inputs, so for short voice notes there's no reason to compress at all.
-    if (transcriptWordCount <= 15) {
-      title = truncateAtWord(transcript, 80);
-      console.log('📝 Short transcript - using full transcript as title:', title);
-    } else {
-      // For longer transcripts, keep the AI's condensed title, but still guard
-      // against it being suspiciously short or generic.
-      const wordCount = title.split(/\s+/).length;
-
-      if (wordCount < 4) {
-        title = truncateAtWord(transcript, 80);
-        console.log('📝 Title was too short, using transcript instead:', title);
-      }
-
-      const genericPatterns = [
-        /^(send|call|buy|get|make|do|meeting|appointment|reminder|task|note|event)$/i,
-        /^(meeting|call|reminder|task|note|event)\s+(with|about|for)?$/i,
-        /^(client|team|doctor|boss|mom|dad|friend)\s+(meeting|call|appointment)$/i,
-      ];
-      const isGeneric = genericPatterns.some(pattern => pattern.test(title.trim()));
-      if (isGeneric) {
-        title = truncateAtWord(transcript, 80);
-        console.log('📝 Title was generic, using transcript instead:', title);
-      }
-    }
+    // ✅ Generate deterministic title from parsed data
+    const title = generateTitle(parsed, trimmedTranscript);
+    const cleanTitleStr = cleanTitle(title);
+    console.log('📝 Generated title:', cleanTitleStr);
 
     return {
       type: parsed.type || 'Note',
-      title: title,
-      content: transcript,
+      title: cleanTitleStr,
       date: parsed.date || null,
       time: parsed.time || null,
       endTime: parsed.endTime || null,
@@ -202,6 +275,7 @@ export const aiParsingService = async (transcript) => {
       repeat: parsed.repeat || null,
       location: parsed.location || null,
       person: parsed.person || null,
+      items: Array.isArray(parsed.items) ? parsed.items : [],
       subtasks: Array.isArray(parsed.subtasks) ? parsed.subtasks : [],
     };
   } catch (error) {
@@ -216,9 +290,11 @@ export const generateBriefingTextService = async (items) => {
       return "Good morning! You have no tasks or events scheduled for today. Enjoy your day! 😊";
     }
 
+    const limitedItems = items.slice(0, 10);
+
     if (isGroqAvailable()) {
       try {
-        const itemsText = items.map((item, index) => {
+        const itemsText = limitedItems.map((item, index) => {
           const time = item.startTime
             ? new Date(item.startTime).toLocaleTimeString('en-US', {
                 hour: '2-digit',
@@ -287,38 +363,8 @@ Keep it natural and conversational.`;
   }
 };
 
-export const generateTaskSuggestion = async (context) => {
-  try {
-    if (!isGroqAvailable()) {
-      return 'What would you like to accomplish today?';
-    }
-
-    const prompt = `Based on the following context, suggest a helpful task or reminder:
-
-Context: ${context}
-
-Provide a brief, actionable suggestion (1 sentence).`;
-
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: "system", content: "You are a helpful assistant that suggests tasks and reminders." },
-        { role: "user", content: prompt },
-      ],
-      model: AI_MODEL,
-      temperature: 0.8,
-      max_tokens: 100,
-    });
-
-    return chatCompletion.choices[0]?.message?.content || 'Consider organizing your tasks for the day.';
-  } catch (error) {
-    console.error('❌ Task suggestion error:', error);
-    return 'What would you like to accomplish today?';
-  }
-};
-
 export default {
   aiParsingService,
   generateBriefingTextService,
-  generateTaskSuggestion,
   isGroqAvailable,
 };

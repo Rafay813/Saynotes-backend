@@ -5,27 +5,28 @@ import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// ✅ Protected routes
+// ✅ All voice routes are protected (require authentication)
 router.use(protect);
 
-// POST /api/voice/process - Process voice and create item
-router.post(
-  '/process',
-  upload.single('audio'),
-  processVoice
-);
+/**
+ * POST /api/v1/voice/process
+ * Process voice recording: transcribe + AI classify + create item
+ * Expects: multipart/form-data with 'audio' file
+ */
+router.post('/process', upload.single('audio'), processVoice);
 
-// POST /api/voice/transcribe - Transcribe audio only
-router.post(
-  '/transcribe',
-  upload.single('audio'),
-  transcribeOnly
-);
+/**
+ * POST /api/v1/voice/transcribe
+ * Transcribe audio only (no AI classification or item creation)
+ * Expects: multipart/form-data with 'audio' file
+ */
+router.post('/transcribe', upload.single('audio'), transcribeOnly);
 
-// POST /api/voice/parse - Parse text with AI
-router.post(
-  '/parse',
-  parseText
-);
+/**
+ * POST /api/v1/voice/parse
+ * Parse text with AI (no audio required)
+ * Expects: JSON with { text, timezone }
+ */
+router.post('/parse', parseText);
 
 export default router;

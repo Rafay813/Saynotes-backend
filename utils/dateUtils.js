@@ -11,6 +11,9 @@ function parseDateString(dateStr, timezone) {
 
   console.log(`📅 Parsing date string: "${dateStr}"`);
 
+  // ✅ Clean ordinal suffixes (th, st, nd, rd) from dates
+  let cleanedDateStr = dateStr.replace(/(\d+)(st|nd|rd|th)/, '$1');
+
   // Relative dates
   const relativeMap = {
     'today': now.startOf('day'),
@@ -23,65 +26,65 @@ function parseDateString(dateStr, timezone) {
     return relativeMap[lower];
   }
 
-  // Weekdays - FIXED: Use proper weekday detection
+  // Weekdays - FIXED: Changed <= to <
   const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   
-  // "next Monday" - FIXED: Changed <= to <
+  // "next Monday"
   for (let i = 0; i < weekdays.length; i++) {
     if (lower.includes(`next ${weekdays[i]}`)) {
       let targetDay = i;
       let currentDay = now.weekday % 7;
       let diff = targetDay - currentDay;
-      if (diff < 0) diff += 7; // ✅ REAL FIX: changed <= to <
+      if (diff < 0) diff += 7;
       const result = now.plus({ days: diff + 7 }).startOf('day');
       console.log(`✅ Parsed as "next ${weekdays[i]}"`);
       return result;
     }
   }
 
-  // "this Friday" or "Friday" - FIXED: Changed <= to <
+  // "this Friday" or "Friday"
   for (let i = 0; i < weekdays.length; i++) {
     if (lower.includes(weekdays[i]) && !lower.includes('next')) {
       let targetDay = i;
       let currentDay = now.weekday % 7;
       let diff = targetDay - currentDay;
-      if (diff < 0) diff += 7; // ✅ REAL FIX: changed <= to <
+      if (diff < 0) diff += 7;
       const result = now.plus({ days: diff }).startOf('day');
       console.log(`✅ Parsed as "${weekdays[i]}"`);
       return result;
     }
   }
 
-  // Try various formats with year
+  // ✅ Try various formats with year (using cleaned date string)
   const formatsWithYear = [
-    'd MMMM yyyy',     // 20 July 2026
-    'MMMM d, yyyy',    // July 20, 2026
-    'd MMM yyyy',      // 20 Jul 2026
-    'yyyy-MM-dd',      // 2026-07-20
-    'MM/dd/yyyy',      // 07/20/2026
-    'dd/MM/yyyy',      // 20/07/2026
-    'd MMMM, yyyy',    // 20 July, 2026
+    'd MMMM yyyy',     // 27 July 2026
+    'MMMM d, yyyy',    // July 27, 2026
+    'd MMM yyyy',      // 27 Jul 2026
+    'yyyy-MM-dd',      // 2026-07-27
+    'MM/dd/yyyy',      // 07/27/2026
+    'dd/MM/yyyy',      // 27/07/2026
+    'd MMMM, yyyy',    // 27 July, 2026
   ];
 
   for (const format of formatsWithYear) {
-    const dt = DateTime.fromFormat(dateStr, format, { zone: timezone });
+    const dt = DateTime.fromFormat(cleanedDateStr, format, { zone: timezone });
     if (dt.isValid) {
       console.log(`✅ Parsed with format "${format}"`);
       return dt;
     }
   }
 
-  // Try formats without year (use current year)
+  // ✅ Try formats without year (use current year)
   const formatsNoYear = [
-    'd MMMM',          // 20 July
-    'MMMM d',          // July 20
-    'd MMM',           // 20 Jul
-    'MM/dd',           // 07/20
-    'dd/MM',           // 20/07
+    'd MMMM',          // 27 July
+    'MMMM d',          // July 27
+    'd MMM',           // 27 Jul
+    'MM/dd',           // 07/27
+    'dd/MM',           // 27/07
   ];
 
   for (const format of formatsNoYear) {
-    const dt = DateTime.fromFormat(dateStr, format, { zone: timezone });
+    const dt = DateTime.fromFormat(cleanedDateStr, format, { zone: timezone });
     if (dt.isValid) {
       console.log(`✅ Parsed with format "${format}", using current year ${now.year}`);
       return dt.set({ year: now.year });

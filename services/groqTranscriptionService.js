@@ -19,8 +19,9 @@ const SUPPORTED_MIME_TYPES = [
   'audio/flac',
 ];
 
-let groq = null;
-let isGroqInitialized = false;
+// ✅ Renamed variable to avoid conflict with function name
+let groqClient = null;
+let groqReady = false;
 
 try {
   if (!process.env.GROQ_API_KEY) {
@@ -28,10 +29,10 @@ try {
   } else if (!process.env.GROQ_API_KEY.startsWith('gsk_')) {
     console.warn('⚠️ GROQ_API_KEY format is invalid. Should start with "gsk_"');
   } else {
-    groq = new Groq({
+    groqClient = new Groq({
       apiKey: process.env.GROQ_API_KEY,
     });
-    isGroqInitialized = true;
+    groqReady = true;
     console.log('✅ Groq transcription service initialized');
   }
 } catch (error) {
@@ -41,7 +42,7 @@ try {
 /**
  * Check if Groq is available
  */
-export const isGroqAvailable = () => isGroqInitialized && !!groq;
+export const isGroqAvailable = () => groqReady && !!groqClient;
 
 /**
  * Validate audio file
@@ -70,7 +71,7 @@ function validateAudio(audioBuffer, mimeType) {
  * Transcribe audio using Groq's Whisper API
  */
 export const transcribeAudioWithGroq = async (audioBuffer, mimeType) => {
-  // ✅ Check availability
+  // Check availability
   if (!isGroqAvailable()) {
     return {
       success: false,
@@ -79,7 +80,7 @@ export const transcribeAudioWithGroq = async (audioBuffer, mimeType) => {
     };
   }
 
-  // ✅ Validate audio
+  // Validate audio
   const validation = validateAudio(audioBuffer, mimeType);
   if (!validation.valid) {
     return { success: false, ...validation };
@@ -89,16 +90,16 @@ export const transcribeAudioWithGroq = async (audioBuffer, mimeType) => {
   console.log(`📁 Size: ${(audioBuffer.length / 1024).toFixed(0)}KB, Type: ${mimeType}`);
 
   try {
-    // ✅ Prepare file
+    // Prepare file using toFile (Groq SDK official method)
     const fileExtension = mimeType?.split('/')[1] || 'm4a';
     const fileName = `recording-${Date.now()}.${fileExtension}`;
     const file = await toFile(audioBuffer, fileName, { type: mimeType });
 
-    // ✅ Transcribe with timeout
+    // Transcribe with timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    const response = await groq.audio.transcriptions.create({
+    const response = await groqClient.audio.transcriptions.create({
       file,
       model: TRANSCRIPTION_MODEL,
       language: 'en',
@@ -123,7 +124,7 @@ export const transcribeAudioWithGroq = async (audioBuffer, mimeType) => {
     return { success: true, transcript };
 
   } catch (error) {
-    // ✅ Handle specific errors
+    // Handle specific errors
     if (error.name === 'AbortError') {
       return {
         success: false,

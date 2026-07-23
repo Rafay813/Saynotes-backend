@@ -3,6 +3,22 @@ import { syncWithGoogleCalendar } from '../services/calendarService.js';
 import { sendReminderEmail } from '../services/emailService.js';
 import { DateTime } from 'luxon';
 
+// ✅ Dashboard cache for invalidation
+const dashboardCache = new Map();
+
+// Helper to get cache key
+function getCacheKey(userId, timezone) {
+  return `${userId.toString()}:${timezone}`;
+}
+
+// ✅ Helper to invalidate dashboard cache
+export const invalidateDashboardCache = (userId) => {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const key = getCacheKey(userId, timezone);
+  dashboardCache.delete(key);
+  console.log(`🗑️ Dashboard cache invalidated for user ${userId}`);
+};
+
 /**
  * Helper: Get timezone-aware day boundaries
  */
@@ -14,9 +30,11 @@ function getDayBoundaries(timezone) {
   const todayUTC = today.toUTC().toJSDate();
   const tomorrowUTC = tomorrow.toUTC().toJSDate();
   
-  console.log(`🌍 Timezone: ${timezone}`);
-  console.log(`📅 UTC today: ${todayUTC.toISOString()}`);
-  console.log(`📅 UTC tomorrow: ${tomorrowUTC.toISOString()}`);
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`🌍 Timezone: ${timezone}`);
+    console.log(`📅 UTC today: ${todayUTC.toISOString()}`);
+    console.log(`📅 UTC tomorrow: ${tomorrowUTC.toISOString()}`);
+  }
   
   return { todayUTC, tomorrowUTC };
 }
@@ -29,7 +47,6 @@ function buildBaseQuery(req) {
   const now = new Date();
   const conditions = [{ userId }];
 
-  // ✅ Exclude items past deleteAfter - supports older documents
   conditions.push({
     $or: [
       { deleteAfter: null },
@@ -42,16 +59,14 @@ function buildBaseQuery(req) {
 }
 
 /**
- * Build Today filter - startTime today OR created today with no time
+ * Build Today filter
  */
 function buildTodayFilter(req, conditions) {
   const timezone = req.query.timezone || 'UTC';
   const { todayUTC, tomorrowUTC } = getDayBoundaries(timezone);
   
-  // ✅ Status: exclude expired and cancelled
   conditions.push({ status: { $nin: ['expired', 'cancelled'] } });
   
-  // ✅ Today: startTime today OR created today with no time
   conditions.push({
     $or: [
       { startTime: { $gte: todayUTC, $lt: tomorrowUTC } },
@@ -63,16 +78,13 @@ function buildTodayFilter(req, conditions) {
 }
 
 /**
- * Build Upcoming filter - startTime >= tomorrow
+ * Build Upcoming filter
  */
 function buildUpcomingFilter(req, conditions) {
   const timezone = req.query.timezone || 'UTC';
   const { tomorrowUTC } = getDayBoundaries(timezone);
   
-  // ✅ Status: exclude expired and cancelled
   conditions.push({ status: { $nin: ['expired', 'cancelled'] } });
-  
-  // ✅ Upcoming: startTime >= tomorrow
   conditions.push({ startTime: { $gte: tomorrowUTC } });
   
   return { query: { $and: conditions }, sort: { startTime: 1, createdAt: -1 } };
@@ -90,7 +102,6 @@ function buildCompletedFilter(req, conditions) {
  * Build All filter
  */
 function buildAllFilter(req, conditions) {
-  // ✅ Status filter if provided, otherwise exclude cancelled/expired
   if (req.query.status) {
     conditions.push({ status: req.query.status });
   } else {
@@ -101,7 +112,7 @@ function buildAllFilter(req, conditions) {
 
 /**
  * @desc    Get items with filtering
- * @route   GET /api/items
+ * @route   GET /api/v1/items
  */
 export const getItems = async (req, res) => {
   try {
@@ -113,19 +124,18 @@ export const getItems = async (req, res) => {
       });
     }
 
-    console.log('📥 GET /api/items');
-    console.log('📥 Query params:', JSON.stringify(req.query, null, 2));
+    if (process.env.NODE_ENV === 'development') {
+      console.log('📥 GET /api/v1/items');
+      console.log('📥 Query params:', JSON.stringify(req.query, null, 2));
+    }
 
-    // ✅ Build base conditions
     const conditions = buildBaseQuery(req);
 
-    // ✅ Filter by type
     if (req.query.type) {
       const types = req.query.type.split(',');
       conditions.push({ type: { $in: types } });
     }
 
-    // ✅ Filter by search
     if (req.query.search) {
       conditions.push({
         $or: [
@@ -135,37 +145,30 @@ export const getItems = async (req, res) => {
       });
     }
 
-    // ✅ Route to appropriate filter
     let result;
     if (req.query.today === 'true') {
-      console.log('📥 Filter: TODAY');
       result = buildTodayFilter(req, conditions);
     } else if (req.query.upcoming === 'true') {
-      console.log('📥 Filter: UPCOMING');
       result = buildUpcomingFilter(req, conditions);
     } else if (req.query.completed === 'true') {
-      console.log('📥 Filter: COMPLETED');
       result = buildCompletedFilter(req, conditions);
     } else {
-      console.log('📥 Filter: ALL');
       result = buildAllFilter(req, conditions);
     }
 
     const { query, sort } = result;
-
     const limit = parseInt(req.query.limit) || 100;
     const page = parseInt(req.query.page) || 1;
     const skip = (page - 1) * limit;
 
-    console.log('📥 Final query:', JSON.stringify(query, null, 2));
-
-    // ✅ PERFORMANCE OPTIMIZATION: Added .lean() to reduce Mongoose document overhead
     const [items, total] = await Promise.all([
       Item.find(query).sort(sort).skip(skip).limit(limit).lean(),
       Item.countDocuments(query),
     ]);
 
-    console.log('📥 Items found:', items.length);
+    if (process.env.NODE_ENV === 'development') {
+      console.log('📥 Items found:', items.length);
+    }
 
     return res.status(200).json({
       success: true,
@@ -189,7 +192,7 @@ export const getItems = async (req, res) => {
 
 /**
  * @desc    Get single item
- * @route   GET /api/items/:id
+ * @route   GET /api/v1/items/:id
  */
 export const getItem = async (req, res) => {
   try {
@@ -227,7 +230,7 @@ export const getItem = async (req, res) => {
 
 /**
  * @desc    Create item
- * @route   POST /api/items
+ * @route   POST /api/v1/items
  */
 export const createItem = async (req, res) => {
   try {
@@ -253,8 +256,6 @@ export const createItem = async (req, res) => {
         errorCode: 'MISSING_TITLE',
       });
     }
-
-    console.log('📝 Creating item:', { type, title, startTime, endTime });
 
     const itemData = {
       userId: req.user._id,
@@ -288,9 +289,8 @@ export const createItem = async (req, res) => {
       await savedItem.save();
     }
 
-    console.log('✅ Item created:', savedItem._id);
-    console.log('📅 StartTime:', savedItem.startTime);
-    console.log('📅 Delete after:', savedItem.deleteAfter);
+    // ✅ Invalidate dashboard cache on create
+    invalidateDashboardCache(req.user._id);
 
     return res.status(201).json({ success: true, item: savedItem });
   } catch (error) {
@@ -305,7 +305,7 @@ export const createItem = async (req, res) => {
 
 /**
  * @desc    Update item (only if not expired)
- * @route   PATCH /api/items/:id
+ * @route   PATCH /api/v1/items/:id
  */
 export const updateItem = async (req, res) => {
   try {
@@ -333,7 +333,7 @@ export const updateItem = async (req, res) => {
     if (item.status === 'expired' || item.deletedAt) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot update expired items. They will be automatically deleted.',
+        message: 'Cannot update expired items.',
         errorCode: 'ITEM_EXPIRED',
       });
     }
@@ -353,14 +353,9 @@ export const updateItem = async (req, res) => {
     ];
     const updates = req.body;
 
-    console.log('📝 Updating item:', { id: req.params.id });
-
     let wasClientBookingEnabled = false;
-
-    // ✅ Track previous status
     const previousStatus = item.status;
 
-    // ✅ Apply updates
     Object.keys(updates).forEach(key => {
       if (allowedUpdates.includes(key)) {
         item[key] = updates[key];
@@ -370,19 +365,14 @@ export const updateItem = async (req, res) => {
       }
     });
 
-    // ✅ Generate video link if client booking was just enabled
     if (wasClientBookingEnabled && item.type === 'Event') {
       item.videoCallLink = `https://meet.jit.si/SayNote-${item._id}`;
-      console.log('✅ Video call link generated:', item.videoCallLink);
     }
 
-    // ✅ Generate if client booking exists but link is missing
     if (item.isClientBooking && !item.videoCallLink && item.type === 'Event') {
       item.videoCallLink = `https://meet.jit.si/SayNote-${item._id}`;
-      console.log('✅ Video call link generated (missing):', item.videoCallLink);
     }
 
-    // ✅ Set completedAt correctly
     if (previousStatus !== 'completed' && item.status === 'completed') {
       item.completedAt = new Date();
     }
@@ -391,17 +381,17 @@ export const updateItem = async (req, res) => {
       item.completedAt = null;
     }
 
-    // ✅ Save and respond immediately — don't block on Google Calendar
     const updatedItem = await item.save();
-    console.log('✅ Item updated:', updatedItem._id);
-    console.log('📅 Delete after recalculated:', updatedItem.deleteAfter);
+
+    // ✅ Invalidate dashboard cache on update
+    invalidateDashboardCache(req.user._id);
 
     // Send response immediately
     res.status(200).json({ success: true, item: updatedItem });
 
-    // ✅ Sync to Google Calendar in the background, after the response is already sent
+    // ✅ Background Google Calendar sync
     if (updatedItem.type === 'Event' && updatedItem.status === 'active') {
-      (async () => {
+      setImmediate(async () => {
         try {
           const gcalResponse = await syncWithGoogleCalendar(updatedItem);
           if (gcalResponse && gcalResponse.googleEventId) {
@@ -413,7 +403,7 @@ export const updateItem = async (req, res) => {
         } catch (gcalError) {
           console.warn('⚠️ Google Calendar sync failed (non-fatal, background):', gcalError.message);
         }
-      })();
+      });
     }
 
     return;
@@ -429,7 +419,7 @@ export const updateItem = async (req, res) => {
 
 /**
  * @desc    Delete item (HARD DELETE)
- * @route   DELETE /api/items/:id
+ * @route   DELETE /api/v1/items/:id
  */
 export const deleteItem = async (req, res) => {
   try {
@@ -455,6 +445,10 @@ export const deleteItem = async (req, res) => {
     }
 
     await item.deleteOne();
+    
+    // ✅ Invalidate dashboard cache on delete
+    invalidateDashboardCache(req.user._id);
+    
     console.log('🗑️ Item permanently deleted:', req.params.id);
 
     return res.status(200).json({
@@ -473,7 +467,7 @@ export const deleteItem = async (req, res) => {
 
 /**
  * @desc    Update item status
- * @route   PATCH /api/items/:id/status
+ * @route   PATCH /api/v1/items/:id/status
  */
 export const updateItemStatus = async (req, res) => {
   try {
@@ -502,7 +496,7 @@ export const updateItemStatus = async (req, res) => {
     if (item.status === 'expired' || item.deletedAt) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot update expired items. They will be automatically deleted.',
+        message: 'Cannot update expired items.',
         errorCode: 'ITEM_EXPIRED',
       });
     }
@@ -530,7 +524,9 @@ export const updateItemStatus = async (req, res) => {
     }
 
     const updatedItem = await item.save();
-    console.log('✅ Status updated:', updatedItem.status);
+
+    // ✅ Invalidate dashboard cache on status update
+    invalidateDashboardCache(req.user._id);
 
     return res.status(200).json({ success: true, item: updatedItem });
   } catch (error) {
@@ -544,8 +540,8 @@ export const updateItemStatus = async (req, res) => {
 };
 
 /**
- * @desc    Confirm item (voice flow)
- * @route   POST /api/items/confirm
+ * @desc    Confirm item (voice flow) - Optimized with findOneAndUpdate
+ * @route   POST /api/v1/items/confirm
  */
 export const confirmItem = async (req, res) => {
   try {
@@ -567,71 +563,88 @@ export const confirmItem = async (req, res) => {
       });
     }
 
-    const item = await Item.findOne({
-      _id: itemId,
-      userId: req.user._id,
-    });
-
-    if (!item) {
-      return res.status(404).json({
-        success: false,
-        message: 'Item not found',
-        errorCode: 'NOT_FOUND',
-      });
-    }
-
-    if (item.status === 'expired' || item.deletedAt) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot confirm expired items. They will be automatically deleted.',
-        errorCode: 'ITEM_EXPIRED',
-      });
-    }
-
     if (action === 'cancel') {
-      item.status = 'cancelled';
-      await item.save();
+      // ✅ Optimized: findOneAndUpdate for cancel
+      const updatedItem = await Item.findOneAndUpdate(
+        {
+          _id: itemId,
+          userId: req.user._id,
+          status: { $nin: ['expired', 'cancelled'] },
+        },
+        {
+          $set: { status: 'cancelled' },
+        },
+        {
+          new: true,
+        }
+      );
+
+      if (!updatedItem) {
+        return res.status(404).json({
+          success: false,
+          message: 'Item not found or already cancelled/expired',
+          errorCode: 'NOT_FOUND',
+        });
+      }
+
+      invalidateDashboardCache(req.user._id);
+
       return res.status(200).json({
         success: true,
         message: 'Item cancelled',
-        item,
+        item: updatedItem,
       });
     }
 
     if (action === 'save') {
-      // ✅ Only update fields that are actually provided
+      // ✅ Build update object
+      const updateData = {
+        status: 'active',
+      };
+
       if (editedData) {
         const allowed = ['type', 'title', 'content', 'startTime', 'endTime', 'priority', 'category'];
-        console.log('📝 Editing item with data:', JSON.stringify(editedData, null, 2));
-        
         Object.keys(editedData).forEach(key => {
-          // ✅ Only update if the field is allowed AND the value is not undefined
           if (allowed.includes(key) && editedData[key] !== undefined) {
-            item[key] = editedData[key];
-            console.log(`✅ Updated ${key} to:`, editedData[key]);
+            updateData[key] = editedData[key];
           }
         });
       }
-      
-      item.status = 'active';
-      
-      console.log('✅ Item confirmed - Status changed to active:', item._id);
-      console.log('📅 StartTime after confirm:', item.startTime);
-      console.log('📅 EndTime after confirm:', item.endTime);
 
-      // ✅ Save and respond immediately — don't block the response on Google Calendar
-      const updatedItem = await item.save();
+      // ✅ Optimized: findOneAndUpdate for save
+      const updatedItem = await Item.findOneAndUpdate(
+        {
+          _id: itemId,
+          userId: req.user._id,
+          status: { $nin: ['expired', 'cancelled'] },
+        },
+        {
+          $set: updateData,
+        },
+        {
+          new: true,
+        }
+      );
 
-      console.log('✅ Item confirmed:', updatedItem._id, 'Type:', updatedItem.type, 'Status:', updatedItem.status);
-      console.log('📅 Final startTime:', updatedItem.startTime);
-      console.log('📅 Final endTime:', updatedItem.endTime);
+      if (!updatedItem) {
+        return res.status(404).json({
+          success: false,
+          message: 'Item not found or already cancelled/expired',
+          errorCode: 'NOT_FOUND',
+        });
+      }
+
+      console.log('✅ Item confirmed:', updatedItem._id);
+
+      // ✅ Invalidate dashboard cache
+      invalidateDashboardCache(req.user._id);
 
       // Send response immediately
       res.status(200).json({ success: true, item: updatedItem });
 
-      // ✅ Sync to Google Calendar in the background, after the response is already sent
+      // ✅ Background Google Calendar sync
       if (updatedItem.type === 'Event') {
-        (async () => {
+        setImmediate(async () => {
           try {
             const gcalResponse = await syncWithGoogleCalendar(updatedItem);
             if (gcalResponse && gcalResponse.googleEventId) {
@@ -643,7 +656,7 @@ export const confirmItem = async (req, res) => {
           } catch (gcalError) {
             console.warn('⚠️ Google Calendar sync failed (non-fatal, background):', gcalError.message);
           }
-        })();
+        });
       }
 
       return;
@@ -666,7 +679,7 @@ export const confirmItem = async (req, res) => {
 
 /**
  * @desc    Send reminder email to client
- * @route   POST /api/items/:id/send-reminder
+ * @route   POST /api/v1/items/:id/send-reminder
  */
 export const sendReminder = async (req, res) => {
   try {
@@ -737,7 +750,7 @@ export const sendReminder = async (req, res) => {
 
 /**
  * @desc    Get expired items
- * @route   GET /api/items/expired
+ * @route   GET /api/v1/items/expired
  */
 export const getExpiredItems = async (req, res) => {
   try {
@@ -768,7 +781,7 @@ export const getExpiredItems = async (req, res) => {
 
 /**
  * @desc    Toggle a subtask done/undone
- * @route   PATCH /api/items/:id/subtask/:index
+ * @route   PATCH /api/v1/items/:id/subtask/:index
  */
 export const toggleSubtask = async (req, res) => {
   try {
@@ -796,7 +809,7 @@ export const toggleSubtask = async (req, res) => {
     if (item.status === 'expired' || item.deletedAt) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot update expired items. They will be automatically deleted.',
+        message: 'Cannot update expired items.',
         errorCode: 'ITEM_EXPIRED',
       });
     }
@@ -824,6 +837,10 @@ export const toggleSubtask = async (req, res) => {
     }
 
     const updated = await item.save();
+
+    // ✅ Invalidate dashboard cache on subtask toggle
+    invalidateDashboardCache(req.user._id);
+
     return res.status(200).json({ success: true, item: updated });
   } catch (error) {
     console.error('❌ Toggle subtask error:', error);

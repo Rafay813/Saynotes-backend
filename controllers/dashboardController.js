@@ -17,9 +17,42 @@ function getDayBoundaries(timezone) {
   return { todayUTC, tomorrowUTC };
 }
 
-// In-memory cache
+// In-memory cache with separate summary cache
 const dashboardCache = new Map();
+const summaryCache = new Map();
 const CACHE_TTL_MS = 30 * 1000;
+const SUMMARY_TTL_MS = 5 * 60 * 1000; // 5 minutes for AI summary
+
+// ✅ Helper to generate summary in background
+async function generateSummaryInBackground(userId, timezone, todayItems, total) {
+  const cacheKey = `${userId.toString()}:${timezone}`;
+  
+  try {
+    let summary;
+    if (todayItems.length > 0) {
+      summary = await generateBriefingTextService(todayItems);
+    } else if (total > 0) {
+      summary = `You have ${total} active items. None are scheduled for today.`;
+    } else {
+      summary = 'You have no active items. Create your first task or note!';
+    }
+    
+    // ✅ Store in separate summary cache
+    summaryCache.set(cacheKey, {
+      summary,
+      timestamp: Date.now(),
+    });
+    
+    console.log('✅ AI summary generated in background');
+  } catch (error) {
+    console.error('❌ Background summary generation failed:', error);
+    // Store fallback summary
+    summaryCache.set(cacheKey, {
+      summary: `You have ${todayItems.length} items scheduled for today.`,
+      timestamp: Date.now(),
+    });
+  }
+}
 
 export const getDashboard = async (req, res) => {
   try {
@@ -36,10 +69,23 @@ export const getDashboard = async (req, res) => {
     const timezone = req.query.timezone || 'UTC';
     const cacheKey = `${userId.toString()}:${timezone}`;
 
-    // Serve from cache
+    // ✅ Check if we have cached summary
+    const cachedSummary = summaryCache.get(cacheKey);
+    let summary = 'Good morning! You have no items scheduled for today.';
+    
+    if (cachedSummary && Date.now() - cachedSummary.timestamp < SUMMARY_TTL_MS) {
+      summary = cachedSummary.summary;
+      console.log('📦 Using cached summary');
+    }
+
+    // ✅ Check dashboard data cache
     const cached = dashboardCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      return res.status(200).json({ ...cached.data, fromCache: true });
+      return res.status(200).json({ 
+        ...cached.data, 
+        summary, // ✅ Use cached summary
+        fromCache: true 
+      });
     }
 
     const { todayUTC, tomorrowUTC } = getDayBoundaries(timezone);
@@ -57,7 +103,7 @@ export const getDashboard = async (req, res) => {
     const activeFilter = { userId, status: 'active', ...notExpiredClause };
     const LIST_FIELDS = 'title type status startTime endTime isClientBooking clientName subtasks createdAt';
 
-    // Run everything concurrently
+    // ✅ Run all queries concurrently
     const [
       todayItems,
       total,
@@ -98,18 +144,16 @@ export const getDashboard = async (req, res) => {
 
     const stats = { total, tasks, events, notes, reminders, completed, expired: 0 };
 
-    let summary = 'Good morning! You have no items scheduled for today.';
-    try {
+    // ✅ If no cached summary, generate one in background (non-blocking)
+    if (!cachedSummary || Date.now() - cachedSummary.timestamp >= SUMMARY_TTL_MS) {
+      // ✅ Fire and forget - don't await
+      generateSummaryInBackground(userId, timezone, todayItems, total);
+      // Use fallback summary for this request
       if (todayItems.length > 0) {
-        summary = await generateBriefingTextService(todayItems);
+        summary = `You have ${todayItems.length} items scheduled for today.`;
       } else if (total > 0) {
         summary = `You have ${total} active items. None are scheduled for today.`;
-      } else {
-        summary = 'You have no active items. Create your first task or note!';
       }
-    } catch (aiError) {
-      console.error('AI summary generation failed:', aiError);
-      summary = `You have ${todayItems.length} items scheduled for today.`;
     }
 
     const responseData = {
@@ -122,8 +166,14 @@ export const getDashboard = async (req, res) => {
       hasTodayItems: todayItems.length > 0,
     };
 
-    dashboardCache.set(cacheKey, { data: responseData, timestamp: Date.now() });
+    // ✅ Cache dashboard data
+    dashboardCache.set(cacheKey, { 
+      data: responseData, 
+      timestamp: Date.now() 
+    });
 
+    console.log(`📊 Dashboard: ${todayItems.length} today, ${total} total`);
+    
     res.status(200).json(responseData);
   } catch (error) {
     console.error('Dashboard error:', error);
@@ -135,3 +185,5 @@ export const getDashboard = async (req, res) => {
     });
   }
 };
+
+export default { getDashboard };

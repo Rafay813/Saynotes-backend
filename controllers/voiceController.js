@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { transcribeAudioWithGroq, isGroqAvailable } from '../services/groqTranscriptionService.js';
 import { aiParsingService } from '../services/aiService.js';
 import { syncWithGoogleCalendar } from '../services/calendarService.js';
@@ -51,7 +52,7 @@ export const processVoice = async (req, res) => {
     const transcript = transcription.transcript;
     console.log(`📝 Transcript: "${transcript}"`);
 
-    // Step 2: AI Classification
+    // Step 2: AI Classification (includes AI-generated title)
     const timezone = req.body.timezone || 'UTC';
     console.log(`🌍 Timezone: ${timezone}`);
 
@@ -65,21 +66,17 @@ export const processVoice = async (req, res) => {
     console.log(`📅 Date from AI: "${classified.date}"`);
     console.log(`⏰ Time from AI: "${classified.time}"`);
 
-    // If we have time but no date, default to "today"
     let dateToUse = classified.date;
-    
     if (!dateToUse && classified.time) {
       dateToUse = 'today';
       console.log('📅 No date provided, defaulting to "today"');
     }
 
-    // Parse date and time
     if (dateToUse) {
       startTime = parseDateTime(dateToUse, classified.time, timezone);
       console.log(`📅 Parsed startTime: ${startTime ? startTime.toISOString() : 'null'}`);
       
       if (startTime) {
-        // Calculate end time
         endTime = calculateEndTime(
           startTime,
           classified.endTime,
@@ -88,8 +85,6 @@ export const processVoice = async (req, res) => {
         );
         console.log(`⏱️ Parsed endTime: ${endTime ? endTime.toISOString() : 'null'}`);
       }
-    } else {
-      console.warn('⚠️ No date or time extracted by AI');
     }
 
     // Step 4: Extract Email
@@ -101,11 +96,15 @@ export const processVoice = async (req, res) => {
     const clientName = isClientBooking ? classified.person : null;
     console.log(`👤 Client: ${clientName || 'none'}, Booking: ${isClientBooking}`);
 
-    // Step 6: Build Item Data
+    // Step 6: Use AI-generated title (already cleaned in aiService)
+    const title = classified.title;
+    console.log(`📝 Final title: "${title}"`);
+
+    // Step 7: Build Item Data
     const itemData = {
       userId: req.user._id,
       type: classified.type || 'Note',
-      title: classified.title || transcript.slice(0, 60),
+      title: title,
       content: transcript,
       startTime: startTime || null,
       endTime: endTime || null,
@@ -121,38 +120,54 @@ export const processVoice = async (req, res) => {
 
     console.log(`📦 Final item data:`, JSON.stringify(itemData, null, 2));
 
-    // Step 7: Add subtasks if Task
-    if (classified.type === 'Task' && classified.subtasks?.length > 0) {
-      itemData.subtasks = classified.subtasks.map(text => ({ text, done: false }));
+    // Step 8: Add items/subtasks
+    if (classified.type === 'Task') {
+      if (classified.items && classified.items.length > 0) {
+        itemData.subtasks = classified.items.map(text => ({ text, done: false }));
+      }
+      if (classified.subtasks && classified.subtasks.length > 0) {
+        itemData.subtasks = classified.subtasks.map(text => ({ text, done: false }));
+      }
     }
 
-    // Step 8: Create and Save Item
-    const item = new Item(itemData);
-    const savedItem = await item.save();
+    // Step 9: Generate video link before save
+    let videoCallLink = null;
+    if (isClientBooking && (classified.type === 'Event' || classified.type === 'Reminder')) {
+      const newId = new mongoose.Types.ObjectId();
+      videoCallLink = `https://meet.jit.si/SayNote-${newId}`;
+      itemData.videoCallLink = videoCallLink;
+      console.log('✅ Video link generated before save:', videoCallLink);
+    }
+
+    // Step 10: Create and Save Item
+    const savedItem = await Item.create(itemData);
 
     console.log(`✅ Item created: ${savedItem._id}`);
-    console.log(`📅 StartTime saved: ${savedItem.startTime}`);
+    console.log(`📝 Title: ${savedItem.title}`);
+    console.log(`📝 Content: ${savedItem.content}`);
 
-    // ✅ Step 9: REMINDER → EVENT AUTO-CREATION
-    // If type is "Reminder" AND there's a startTime, ALSO create a linked Event
+    // Step 11: REMINDER → EVENT AUTO-CREATION
     let linkedEvent = null;
     if (savedItem.type === 'Reminder' && savedItem.startTime) {
       console.log(`🔗 Creating linked Event from Reminder: "${savedItem.title}"`);
       
-      // Calculate end time for the event (default 30 minutes)
       let eventEndTime = new Date(savedItem.startTime);
       eventEndTime.setMinutes(eventEndTime.getMinutes() + 30);
       
-      // If we have an endTime from the original, use it
       if (savedItem.endTime) {
         eventEndTime = savedItem.endTime;
       }
       
-      // Create the linked Event
+      let eventVideoLink = null;
+      if (savedItem.isClientBooking) {
+        const newId = new mongoose.Types.ObjectId();
+        eventVideoLink = `https://meet.jit.si/SayNote-${newId}`;
+      }
+      
       const eventData = {
         userId: req.user._id,
         type: 'Event',
-        title: `Event: ${savedItem.title}`,
+        title: savedItem.title,
         content: `Linked to reminder: "${savedItem.title}"\nOriginal transcript: ${transcript}`,
         startTime: savedItem.startTime,
         endTime: eventEndTime,
@@ -163,57 +178,23 @@ export const processVoice = async (req, res) => {
         clientName: savedItem.clientName || null,
         clientEmail: savedItem.clientEmail || null,
         location: savedItem.location || null,
-        // Link back to the reminder
         linkedReminderId: savedItem._id,
         isLinkedEvent: true,
+        videoCallLink: eventVideoLink,
       };
 
-      // Add video call link if client booking
-      if (eventData.isClientBooking) {
-        eventData.videoCallLink = `https://meet.jit.si/SayNote-${savedItem._id}`;
-      }
-
-      const eventItem = new Item(eventData);
-      linkedEvent = await eventItem.save();
+      linkedEvent = await Item.create(eventData);
       
       console.log(`✅ Linked Event created: ${linkedEvent._id}`);
       
-      // ✅ FIXED: Use $set only, no mixed operators
       await Item.findByIdAndUpdate(savedItem._id, {
         $set: { linkedEventId: linkedEvent._id }
       });
       
       console.log(`🔗 Reminder ${savedItem._id} linked to Event ${linkedEvent._id}`);
-
-      // ✅ FIXED: Sync the linked Event with Google Calendar
-      try {
-        const syncResult = await syncWithGoogleCalendar(linkedEvent);
-        console.log('✅ Linked event synced with Google Calendar:', syncResult);
-      } catch (calendarError) {
-        console.error('⚠️ Linked event calendar sync error (non-fatal):', calendarError);
-      }
     }
 
-    // Step 10: Generate video link if client booking and type is Event
-    if (savedItem.type === 'Event' && savedItem.isClientBooking) {
-      savedItem.videoCallLink = `https://meet.jit.si/SayNote-${savedItem._id}`;
-      await savedItem.save();
-      console.log('✅ Video link generated for Event');
-    }
-
-    // Step 11: Sync with Google Calendar if connected (skip linked events to avoid duplicates)
-    // ✅ FIXED: Check isLinkedEvent flag
-    if (savedItem.type === 'Event' && savedItem.startTime && !savedItem.isLinkedEvent) {
-      try {
-        const syncResult = await syncWithGoogleCalendar(savedItem);
-        console.log('✅ Google Calendar sync result:', syncResult);
-      } catch (calendarError) {
-        console.error('⚠️ Calendar sync error (non-fatal):', calendarError);
-        // Don't fail the request if calendar sync fails
-      }
-    }
-
-    // Step 12: Return Response with both items if linked
+    // Step 12: Send response
     const responseData = {
       success: true,
       message: 'Voice processed successfully',
@@ -221,13 +202,47 @@ export const processVoice = async (req, res) => {
       item: savedItem,
     };
 
-    // If we created a linked event, include it in the response
     if (linkedEvent) {
       responseData.linkedEvent = linkedEvent;
       responseData.message = 'Voice processed successfully. Linked Event created from Reminder.';
     }
 
-    return res.status(201).json(responseData);
+    res.status(201).json(responseData);
+
+    // Step 13: Background tasks - Google Calendar sync
+    if (savedItem.type === 'Event' && savedItem.startTime && !savedItem.isLinkedEvent) {
+      setImmediate(async () => {
+        try {
+          const syncResult = await syncWithGoogleCalendar(savedItem);
+          if (syncResult && syncResult.googleEventId) {
+            savedItem.googleEventId = syncResult.googleEventId;
+            savedItem.isSynced = true;
+            await savedItem.save();
+            console.log('✅ Google Calendar synced (background):', syncResult);
+          }
+        } catch (gcalError) {
+          console.warn('⚠️ Calendar sync error (non-fatal, background):', gcalError.message);
+        }
+      });
+    }
+
+    if (linkedEvent) {
+      setImmediate(async () => {
+        try {
+          const syncResult = await syncWithGoogleCalendar(linkedEvent);
+          if (syncResult && syncResult.googleEventId) {
+            linkedEvent.googleEventId = syncResult.googleEventId;
+            linkedEvent.isSynced = true;
+            await linkedEvent.save();
+            console.log('✅ Linked event synced (background):', syncResult);
+          }
+        } catch (gcalError) {
+          console.warn('⚠️ Linked event sync error (non-fatal, background):', gcalError.message);
+        }
+      });
+    }
+
+    return;
 
   } catch (error) {
     console.error('❌ Voice processing error:', error);
@@ -294,7 +309,7 @@ export const transcribeOnly = async (req, res) => {
 };
 
 /**
- * Parse text with AI
+ * Parse text with AI (no audio required)
  */
 export const parseText = async (req, res) => {
   try {

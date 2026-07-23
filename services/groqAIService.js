@@ -1,5 +1,6 @@
 import Groq from 'groq-sdk';
 
+// ✅ Singleton Groq client
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
@@ -19,7 +20,7 @@ export const parseWithGroq = async (transcript, timezone = 'Asia/Karachi') => {
       
       Return ONLY a valid JSON object with these fields:
       - type: "Note" | "Task" | "Reminder" | "Event"
-      - title: string (short title, max 8 words)
+      - title: string (descriptive title, preserve important details)
       - content: string (full description)
       - date: string (YYYY-MM-DD) or null (if a date is mentioned)
       - time: string (HH:MM) or null (if a time is mentioned)
@@ -54,7 +55,7 @@ export const parseWithGroq = async (transcript, timezone = 'Asia/Karachi') => {
     const text = response.choices[0]?.message?.content || '';
     console.log('🤖 Groq raw response:', text);
 
-    // ✅ Extract JSON from response
+    // Extract JSON from response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.warn('⚠️ No JSON found in Groq response, using fallback');
