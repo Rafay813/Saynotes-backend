@@ -86,7 +86,7 @@ const itemSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
-  // ✅ Reminder → Event linking
+  // Reminder → Event linking
   linkedEventId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Item',
@@ -97,7 +97,6 @@ const itemSchema = new mongoose.Schema({
     ref: 'Item',
     default: null,
   },
-  // ✅ IMPORTANT: Flag to identify linked events (was missing)
   isLinkedEvent: {
     type: Boolean,
     default: false,
@@ -110,33 +109,80 @@ const itemSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Helper function - can be imported from here
-export function computeDeleteAfter({ type, startTime, endTime }) {
+// ✅ Helper function - computes deleteAfter based on item type and dates
+export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
   const now = new Date();
   
-  if (endTime) {
-    const d = new Date(endTime);
-    d.setMinutes(d.getMinutes() + 60);
+  // ✅ For Notes: keep forever (or 30 days)
+  if (type === 'Note') {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 30);
     return d;
   }
   
-  if (startTime) {
-    const d = new Date(startTime);
-    d.setHours(23, 59, 59, 999);
+  // ✅ For Tasks: keep forever (or 30 days)
+  if (type === 'Task') {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 30);
     return d;
   }
   
+  // ✅ For Reminders: keep 7 days after reminder date or 30 days from creation
+  if (type === 'Reminder') {
+    if (startTime) {
+      const d = new Date(startTime);
+      d.setDate(d.getDate() + 7);
+      return d;
+    }
+    const d = new Date(now);
+    d.setDate(d.getDate() + 30);
+    return d;
+  }
+  
+  // ✅ For Events: keep 7 days after the event ends
+  if (type === 'Event') {
+    if (endTime) {
+      const d = new Date(endTime);
+      d.setDate(d.getDate() + 7);
+      return d;
+    }
+    if (startTime) {
+      const d = new Date(startTime);
+      d.setDate(d.getDate() + 7);
+      return d;
+    }
+    // If no startTime, keep 30 days from creation
+    const d = new Date(now);
+    d.setDate(d.getDate() + 30);
+    return d;
+  }
+  
+  // Default: keep 30 days
   const d = new Date(now);
-  d.setDate(d.getDate() + 7);
+  d.setDate(d.getDate() + 30);
   return d;
 }
+
+// ✅ Pre-save middleware to auto-calculate deleteAfter
+itemSchema.pre('save', function(next) {
+  // Only calculate if not explicitly set
+  if (this.deleteAfter === undefined || this.deleteAfter === null) {
+    this.deleteAfter = computeDeleteAfter({
+      type: this.type,
+      startTime: this.startTime,
+      endTime: this.endTime,
+      createdAt: this.createdAt || new Date(),
+    });
+  }
+  next();
+});
 
 // Indexes for performance
 itemSchema.index({ userId: 1, type: 1, status: 1 });
 itemSchema.index({ userId: 1, startTime: 1 });
 itemSchema.index({ userId: 1, createdAt: -1 });
 itemSchema.index({ deleteAfter: 1 });
-itemSchema.index({ userId: 1, isLinkedEvent: 1 }); // ✅ Added index for linked event queries
+itemSchema.index({ userId: 1, isLinkedEvent: 1 });
 
 const Item = mongoose.model('Item', itemSchema);
 
