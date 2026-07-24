@@ -5,7 +5,10 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { startAutoDeleteWorker, runInitialCleanup } from './workers/autoDeleteWorker.js';
+// Add these imports
+import syncRoutes from './routes/syncRoutes.js';
 
+// Add this route
 // Import routes
 import authRoutes from './routes/authRoutes.js';
 import itemRoutes from './routes/itemRoutes.js';
@@ -56,6 +59,8 @@ app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/items', itemRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/voice', voiceRoutes);
+app.use('/api/v1/sync', syncRoutes);
+
 app.use('/api/v1/calendar', calendarRoutes);
 
 // ✅ Backward compatibility

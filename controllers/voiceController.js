@@ -59,24 +59,41 @@ export const processVoice = async (req, res) => {
     const classified = await aiParsingService(transcript);
     console.log('🤖 Classified:', JSON.stringify(classified, null, 2));
 
-    // Step 3: Parse Date/Time
+    // Step 3: Parse Date/Time - FIXED
     let startTime = null;
     let endTime = null;
 
     console.log(`📅 Date from AI: "${classified.date}"`);
     console.log(`⏰ Time from AI: "${classified.time}"`);
 
+    // ✅ FIX: If we have time but no date, default to "today"
     let dateToUse = classified.date;
+
     if (!dateToUse && classified.time) {
       dateToUse = 'today';
       console.log('📅 No date provided, defaulting to "today"');
     }
 
+    // ✅ FIX: If we have date but no time, default to "9:00 AM"
+    if (dateToUse && !classified.time) {
+      classified.time = '9:00 AM';
+      console.log('⏰ No time provided, defaulting to "9:00 AM"');
+    }
+
+    // ✅ FIX: If no date and no time, default to today 9:00 AM
+    if (!dateToUse && !classified.time) {
+      dateToUse = 'today';
+      classified.time = '9:00 AM';
+      console.log('📅⏰ No date/time provided, defaulting to "today 9:00 AM"');
+    }
+
+    // Parse date and time
     if (dateToUse) {
       startTime = parseDateTime(dateToUse, classified.time, timezone);
       console.log(`📅 Parsed startTime: ${startTime ? startTime.toISOString() : 'null'}`);
       
       if (startTime) {
+        // Calculate end time
         endTime = calculateEndTime(
           startTime,
           classified.endTime,
@@ -85,6 +102,8 @@ export const processVoice = async (req, res) => {
         );
         console.log(`⏱️ Parsed endTime: ${endTime ? endTime.toISOString() : 'null'}`);
       }
+    } else {
+      console.warn('⚠️ No date or time extracted by AI');
     }
 
     // Step 4: Extract Email
@@ -145,6 +164,8 @@ export const processVoice = async (req, res) => {
     console.log(`✅ Item created: ${savedItem._id}`);
     console.log(`📝 Title: ${savedItem.title}`);
     console.log(`📝 Content: ${savedItem.content}`);
+    console.log(`📅 StartTime: ${savedItem.startTime}`);
+    console.log(`⏰ EndTime: ${savedItem.endTime}`);
 
     // Step 11: REMINDER → EVENT AUTO-CREATION
     let linkedEvent = null;

@@ -11,7 +11,7 @@ function parseDateString(dateStr, timezone) {
 
   console.log(`📅 Parsing date string: "${dateStr}"`);
 
-  // ✅ Clean ordinal suffixes (th, st, nd, rd) from dates
+  // Clean ordinal suffixes (th, st, nd, rd) from dates
   let cleanedDateStr = dateStr.replace(/(\d+)(st|nd|rd|th)/, '$1');
 
   // Relative dates
@@ -26,7 +26,7 @@ function parseDateString(dateStr, timezone) {
     return relativeMap[lower];
   }
 
-  // Weekdays - FIXED: Changed <= to <
+  // Weekdays
   const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   
   // "next Monday"
@@ -55,7 +55,7 @@ function parseDateString(dateStr, timezone) {
     }
   }
 
-  // ✅ Try various formats with year (using cleaned date string)
+  // Try various formats with year (using cleaned date string)
   const formatsWithYear = [
     'd MMMM yyyy',     // 27 July 2026
     'MMMM d, yyyy',    // July 27, 2026
@@ -74,7 +74,7 @@ function parseDateString(dateStr, timezone) {
     }
   }
 
-  // ✅ Try formats without year (use current year)
+  // Try formats without year (use current year)
   const formatsNoYear = [
     'd MMMM',          // 27 July
     'MMMM d',          // July 27
@@ -96,7 +96,7 @@ function parseDateString(dateStr, timezone) {
 }
 
 /**
- * Parse time string
+ * ✅ Parse time string - FIXED to handle more formats
  */
 function parseTimeString(timeStr) {
   if (!timeStr) return null;
@@ -108,7 +108,7 @@ function parseTimeString(timeStr) {
   if (trimmed === 'noon') return { hours: 12, minutes: 0 };
   if (trimmed === 'midnight') return { hours: 0, minutes: 0 };
 
-  // HH:MM format (24-hour)
+  // ✅ HH:MM format (24-hour)
   const match24 = trimmed.match(/^(\d{1,2}):(\d{2})$/);
   if (match24) {
     const result = { hours: parseInt(match24[1]), minutes: parseInt(match24[2]) };
@@ -116,7 +116,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // 12-hour format with AM/PM
+  // ✅ 12-hour format with AM/PM
   const match12 = trimmed.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
   if (match12) {
     let hours = parseInt(match12[1]);
@@ -129,7 +129,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // Just a number (e.g., "7" → 7:00)
+  // ✅ Just a number (e.g., "7" → 7:00) - FIXED to handle AM/PM based on context
   const matchHour = trimmed.match(/^(\d{1,2})$/);
   if (matchHour) {
     let hours = parseInt(matchHour[1]);
@@ -139,9 +139,39 @@ function parseTimeString(timeStr) {
       console.log(`✅ Parsed as 24-hour number: ${result.hours}:00`);
       return result;
     }
-    // Otherwise, assume AM (morning)
+    // If hours < 6, assume PM (evening) for better UX
+    // This is a heuristic - if someone says "7" they usually mean 7 PM
+    if (hours >= 1 && hours <= 6) {
+      hours += 12;
+      console.log(`✅ Parsed as PM: ${hours}:00 (assumed PM for ${hours-12})`);
+    }
     const result = { hours, minutes: 0 };
-    console.log(`✅ Parsed as hour number: ${result.hours}:00 (assuming AM)`);
+    console.log(`✅ Parsed as hour number: ${result.hours}:00`);
+    return result;
+  }
+
+  // ✅ "7pm" without space
+  const matchNoSpace = trimmed.match(/^(\d{1,2})(am|pm)$/);
+  if (matchNoSpace) {
+    let hours = parseInt(matchNoSpace[1]);
+    const meridian = matchNoSpace[2];
+    if (meridian === 'pm' && hours !== 12) hours += 12;
+    if (meridian === 'am' && hours === 12) hours = 0;
+    const result = { hours, minutes: 0 };
+    console.log(`✅ Parsed as "${meridian}" without space: ${result.hours}:00`);
+    return result;
+  }
+
+  // ✅ "7 o'clock" or "7 o clock"
+  const matchOClock = trimmed.match(/^(\d{1,2})\s*o'?clock$/);
+  if (matchOClock) {
+    let hours = parseInt(matchOClock[1]);
+    // Assume PM if hours < 6 (heuristic)
+    if (hours >= 1 && hours <= 6) {
+      hours += 12;
+    }
+    const result = { hours, minutes: 0 };
+    console.log(`✅ Parsed as o'clock: ${result.hours}:00`);
     return result;
   }
 
@@ -267,6 +297,10 @@ export function parseDateTime(dateStr, timeStr, timezone) {
     } else {
       console.warn(`⚠️ Could not parse time: "${timeStr}"`);
     }
+  } else {
+    // ✅ If no time specified, default to 9:00 AM
+    console.log('⏰ No time specified, defaulting to 9:00 AM');
+    dt = dt.set({ hour: 9, minute: 0 });
   }
 
   // Ensure date is in the future (for relative dates like "Friday")

@@ -1,55 +1,217 @@
+import GoogleAdapter from '../services/GoogleAdapter.js';
 import Item from '../models/Item.js';
 
-// @desc    Sync offline items
-// @route   POST /api/v1/sync
-// @access  Private
-export const syncItems = async (req, res) => {
+/**
+ * Sync an item to Google
+ */
+export const syncToGoogle = async (req, res) => {
   try {
-    const { items } = req.body; // Array of offline items
-
-    if (!items || !Array.isArray(items)) {
-      return res.status(400).json({ message: 'Please provide an array of items' });
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+      });
     }
 
-    // Prepare bulk write operations
-    const bulkOps = items.map((item) => {
-      // Ensure the item belongs to the authenticated user.
-      // NOTE: The Item schema field is `userId`, not `user` — using the
-      // wrong field name here silently dropped ownership on synced items.
-      const { _id, ...itemData } = item;
-      itemData.userId = req.user._id;
+    const { itemId, type } = req.body;
 
-      // If it has an _id, we update it. If not, we insert it.
-      // Offline items usually come with a local ID or no MongoDB ID.
-      // Assuming if they have an _id, it's an update. If not, it's an insert.
-      if (_id) {
-        return {
-          updateOne: {
-            filter: { _id, userId: req.user._id },
-            update: { $set: itemData },
-            upsert: true,
-          },
-        };
-      } else {
-        return {
-          insertOne: {
-            document: itemData,
-          },
-        };
-      }
+    if (!itemId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Item ID is required',
+      });
+    }
+
+    const item = await Item.findOne({
+      _id: itemId,
+      userId: req.user._id,
     });
 
-    if (bulkOps.length > 0) {
-      const result = await Item.bulkWrite(bulkOps);
-      res.status(200).json({
-        message: 'Sync successful',
-        result,
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Item not found',
+      });
+    }
+
+    let result;
+
+    if (type === 'task' || item.type === 'Task') {
+      // Sync as Google Task
+      result = await GoogleAdapter.createGoogleTask(req.user._id, {
+        title: item.title,
+        description: item.content,
+        dueDate: item.startTime,
+        subtasks: item.subtasks?.map(s => s.text) || [],
+      });
+    } else if (type === 'event' || item.type === 'Event') {
+      // Sync as Google Calendar Event
+      result = await GoogleAdapter.createCalendarEvent(req.user._id, {
+        title: item.title,
+        description: item.content,
+        startTime: item.startTime,
+        endTime: item.endTime || new Date(new Date(item.startTime).getTime() + 30 * 60000),
+        location: item.location,
+        timezone: req.user.timezone || 'UTC',
       });
     } else {
-      res.status(200).json({ message: 'No items to sync' });
+      return res.status(400).json({
+        success: false,
+        message: 'Unsupported item type for sync',
+      });
+    }
+
+    if (result.success) {
+      // Update item with sync info
+      if (result.googleEventId) {
+        item.googleEventId = result.googleEventId;
+        item.isSynced = true;
+        await item.save();
+      } else if (result.googleTaskId) {
+        item.googleTaskId = result.googleTaskId;
+        item.isSynced = true;
+        await item.save();
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Item synced to Google successfully',
+        result: result,
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to sync to Google',
+        error: result.error,
+      });
     }
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error during sync', error: error.message });
+    console.error('❌ Sync error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * Sync all active items to Google
+ */
+export const syncAllToGoogle = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+      });
+    }
+
+    const items = await Item.find({
+      userId: req.user._id,
+      status: 'active',
+      isSynced: false,
+    });
+
+    const results = {
+      synced: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    for (const item of items) {
+      try {
+        let result;
+        if (item.type === 'Task') {
+          result = await GoogleAdapter.createGoogleTask(req.user._id, {
+            title: item.title,
+            description: item.content,
+            dueDate: item.startTime,
+            subtasks: item.subtasks?.map(s => s.text) || [],
+          });
+          if (result.success) {
+            item.googleTaskId = result.googleTaskId;
+            item.isSynced = true;
+            await item.save();
+            results.synced++;
+          }
+        } else if (item.type === 'Event') {
+          result = await GoogleAdapter.createCalendarEvent(req.user._id, {
+            title: item.title,
+            description: item.content,
+            startTime: item.startTime,
+            endTime: item.endTime || new Date(new Date(item.startTime).getTime() + 30 * 60000),
+            location: item.location,
+            timezone: req.user.timezone || 'UTC',
+          });
+          if (result.success) {
+            item.googleEventId = result.googleEventId;
+            item.isSynced = true;
+            await item.save();
+            results.synced++;
+          }
+        }
+      } catch (error) {
+        results.failed++;
+        results.errors.push({
+          itemId: item._id,
+          title: item.title,
+          error: error.message,
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Synced ${results.synced} items, ${results.failed} failed`,
+      results,
+    });
+  } catch (error) {
+    console.error('❌ Sync all error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+/**
+ * Get Google sync status
+ */
+export const getSyncStatus = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+      });
+    }
+
+    const user = await User.findById(req.user._id);
+    const isConnected = !!(user?.googleAccessToken);
+
+    const syncedCount = await Item.countDocuments({
+      userId: req.user._id,
+      isSynced: true,
+    });
+
+    const pendingCount = await Item.countDocuments({
+      userId: req.user._id,
+      isSynced: false,
+      status: 'active',
+    });
+
+    return res.status(200).json({
+      success: true,
+      connected: isConnected,
+      syncedCount,
+      pendingCount,
+      total: syncedCount + pendingCount,
+    });
+  } catch (error) {
+    console.error('❌ Get sync status error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
   }
 };
