@@ -125,6 +125,13 @@ async function findFreeTimeWindows(userId, timezone, date) {
     
     console.log(`📋 Found ${items.length} existing items for today`);
     
+    // Log item details for debugging
+    items.forEach((item, index) => {
+      const start = item.startTime ? new Date(item.startTime).toLocaleTimeString() : 'no start';
+      const end = item.endTime ? new Date(item.endTime).toLocaleTimeString() : 'not set';
+      console.log(`  Item ${index + 1}: ${item.title} - ${start} to ${end}`);
+    });
+    
     // ✅ Combine all busy times (events + items)
     const busyTimes = [];
     
@@ -137,7 +144,6 @@ async function findFreeTimeWindows(userId, timezone, date) {
           source: 'calendar'
         });
       } else if (e.startTime) {
-        // If no end time, assume 1 hour duration
         const start = new Date(e.startTime);
         const end = new Date(start.getTime() + 60 * 60 * 1000);
         busyTimes.push({ start, end, source: 'calendar' });
@@ -152,7 +158,6 @@ async function findFreeTimeWindows(userId, timezone, date) {
         if (item.endTime) {
           end = new Date(item.endTime);
         } else {
-          // If no end time, assume 30 minutes for tasks, 1 hour for events
           const duration = item.type === 'Event' ? 60 : 30;
           end = new Date(start.getTime() + duration * 60 * 1000);
         }
@@ -160,7 +165,7 @@ async function findFreeTimeWindows(userId, timezone, date) {
       }
     });
     
-    console.log(`📊 Total busy times: ${busyTimes.length} (${events.length} from calendar, ${items.length} from items)`);
+    console.log(`📊 Total busy times: ${busyTimes.length}`);
     
     // ✅ Sort busy times by start time
     busyTimes.sort((a, b) => a.start - b.start);
@@ -173,7 +178,6 @@ async function findFreeTimeWindows(userId, timezone, date) {
       } else {
         const last = mergedBusyTimes[mergedBusyTimes.length - 1];
         if (busy.start <= last.end) {
-          // Overlapping - merge
           last.end = new Date(Math.max(last.end, busy.end));
         } else {
           mergedBusyTimes.push(busy);
@@ -182,29 +186,47 @@ async function findFreeTimeWindows(userId, timezone, date) {
     }
     
     console.log(`📊 After merging: ${mergedBusyTimes.length} busy periods`);
+    mergedBusyTimes.forEach((busy, i) => {
+      console.log(`  Busy ${i+1}: ${busy.start.toLocaleTimeString()} - ${busy.end.toLocaleTimeString()}`);
+    });
     
     // ✅ Find free windows (gaps between busy times)
     const rawWindows = [];
     let currentTime = startOfDay;
     
-    for (const busy of mergedBusyTimes) {
-      if (busy.start > currentTime) {
-        rawWindows.push({ start: new Date(currentTime), end: new Date(busy.start) });
-      }
-      currentTime = new Date(Math.max(currentTime, busy.end));
-    }
-    
-    // Add final window after last busy period
-    if (currentTime < endOfDay) {
-      rawWindows.push({ start: new Date(currentTime), end: new Date(endOfDay) });
-    }
-    
-    // If no busy times, whole day is free
     if (mergedBusyTimes.length === 0) {
+      // No busy times - whole day is free
       rawWindows.push({ start: new Date(startOfDay), end: new Date(endOfDay) });
+    } else {
+      // Check gaps between busy periods
+      for (const busy of mergedBusyTimes) {
+        // Gap before this busy period
+        if (busy.start > currentTime) {
+          const duration = (busy.start - currentTime) / (1000 * 60);
+          if (duration >= 15) {
+            rawWindows.push({ start: new Date(currentTime), end: new Date(busy.start) });
+          }
+        }
+        // Move current time to the end of this busy period
+        if (busy.end > currentTime) {
+          currentTime = new Date(busy.end);
+        }
+      }
+      
+      // Gap after the last busy period
+      if (endOfDay > currentTime) {
+        const duration = (endOfDay - currentTime) / (1000 * 60);
+        if (duration >= 15) {
+          rawWindows.push({ start: new Date(currentTime), end: new Date(endOfDay) });
+        }
+      }
     }
     
-    console.log(`📊 Found ${rawWindows.length} raw windows before filtering`);
+    console.log(`📊 Found ${rawWindows.length} raw windows`);
+    rawWindows.forEach((w, i) => {
+      const duration = (w.end - w.start) / (1000 * 60);
+      console.log(`  Raw window ${i+1}: ${w.start.toLocaleTimeString()} - ${w.end.toLocaleTimeString()} (${Math.floor(duration)} min)`);
+    });
     
     // ✅ Cap each window at 60 min max, drop anything under 15 min
     const MAX_WINDOW_MINUTES = 60;
@@ -213,50 +235,76 @@ async function findFreeTimeWindows(userId, timezone, date) {
     
     const windows = rawWindows
       .map(w => {
-        // Calculate duration
         const rawDurationMinutes = (w.end - w.start) / (1000 * 60);
         if (rawDurationMinutes < MIN_WINDOW_MINUTES) return null;
         
         // Cap duration at MAX_WINDOW_MINUTES
         const cappedDuration = Math.min(rawDurationMinutes, MAX_WINDOW_MINUTES);
-        const cappedEnd = new Date(w.start.getTime() + cappedDuration * 60 * 1000);
         
-        // Determine if this window is in the past
-        const isPast = w.end <= now2;
-        const isPartiallyPast = w.start < now2 && w.end > now2;
+        // For windows longer than MAX_WINDOW_MINUTES, we need to split them into multiple 60-min windows
+        const resultWindows = [];
+        let currentStart = new Date(w.start);
         
-        let effectiveStart = w.start;
-        let effectiveEnd = cappedEnd;
-        let effectiveDuration = cappedDuration;
-        let isPastFlag = false;
-        
-        if (isPartiallyPast) {
-          // Window started in the past but ends in the future
-          effectiveStart = now2;
-          const remainingDuration = (w.end - now2) / (1000 * 60);
-          effectiveDuration = Math.min(remainingDuration, MAX_WINDOW_MINUTES);
-          effectiveEnd = new Date(effectiveStart.getTime() + effectiveDuration * 60 * 1000);
-          if (effectiveDuration < MIN_WINDOW_MINUTES) return null;
-          isPastFlag = false; // Still has future time
-        } else if (isPast) {
-          isPastFlag = true;
+        while (currentStart < w.end) {
+          const remaining = (w.end - currentStart) / (1000 * 60);
+          const duration = Math.min(remaining, MAX_WINDOW_MINUTES);
+          const end = new Date(currentStart.getTime() + duration * 60 * 1000);
+          
+          // Determine if this sub-window is in the past
+          const isPast = end <= now2;
+          const isPartiallyPast = currentStart < now2 && end > now2;
+          
+          let effectiveStart = currentStart;
+          let effectiveEnd = end;
+          let effectiveDuration = duration;
+          let isPastFlag = false;
+          
+          if (isPartiallyPast) {
+            effectiveStart = now2;
+            const remainingDuration = (end - now2) / (1000 * 60);
+            if (remainingDuration < MIN_WINDOW_MINUTES) {
+              currentStart = end;
+              continue;
+            }
+            effectiveDuration = remainingDuration;
+            effectiveEnd = new Date(effectiveStart.getTime() + effectiveDuration * 60 * 1000);
+            isPastFlag = false;
+          } else if (isPast) {
+            isPastFlag = true;
+          }
+          
+          if (effectiveDuration >= MIN_WINDOW_MINUTES) {
+            resultWindows.push({
+              start: effectiveStart,
+              end: effectiveEnd,
+              duration: Math.floor(effectiveDuration),
+              isPast: isPastFlag,
+              rawDuration: Math.floor(rawDurationMinutes),
+            });
+          }
+          
+          currentStart = end;
         }
         
-        return {
-          start: effectiveStart,
-          end: effectiveEnd,
-          duration: Math.floor(effectiveDuration),
-          isPast: isPastFlag,
-          rawStart: w.start,
-          rawEnd: w.end,
-          rawDuration: Math.floor(rawDurationMinutes),
-        };
+        return resultWindows.length > 0 ? resultWindows : null;
       })
       .filter(Boolean)
+      .flat()
       .sort((a, b) => a.start - b.start);
     
+    // Remove duplicate windows (by checking start time)
+    const uniqueWindows = [];
+    const seenStarts = new Set();
+    for (const w of windows) {
+      const key = w.start.toISOString();
+      if (!seenStarts.has(key)) {
+        seenStarts.add(key);
+        uniqueWindows.push(w);
+      }
+    }
+    
     // Format for response
-    const result = windows.map(w => ({
+    const result = uniqueWindows.map(w => ({
       start: w.start.toISOString(),
       end: w.end.toISOString(),
       duration: w.duration,
@@ -270,11 +318,9 @@ async function findFreeTimeWindows(userId, timezone, date) {
     const pastCount = result.filter(w => w.isPast).length;
     
     console.log(`✅ Returning ${result.length} windows (${pastCount} past, ${futureCount} future)`);
-    if (result.length > 0) {
-      result.forEach((w, i) => {
-        console.log(`  Window ${i+1}: ${w.startTime} - ${w.endTime} (${w.duration} min, ${w.isPast ? 'past' : 'future'})`);
-      });
-    }
+    result.forEach((w, i) => {
+      console.log(`  Window ${i+1}: ${w.startTime} - ${w.endTime} (${w.duration} min, ${w.isPast ? 'past' : 'future'})`);
+    });
     
     return result;
   } catch (error) {
