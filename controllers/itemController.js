@@ -1,23 +1,8 @@
 import Item from '../models/Item.js';
 import { syncWithGoogleCalendar } from '../services/calendarService.js';
 import { sendReminderEmail } from '../services/emailService.js';
+import { invalidateDashboardCache } from './dashboardController.js'; // ✅ use the real shared cache
 import { DateTime } from 'luxon';
-
-// ✅ Dashboard cache for invalidation
-const dashboardCache = new Map();
-
-// Helper to get cache key
-function getCacheKey(userId, timezone) {
-  return `${userId.toString()}:${timezone}`;
-}
-
-// ✅ Helper to invalidate dashboard cache
-export const invalidateDashboardCache = (userId) => {
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const key = getCacheKey(userId, timezone);
-  dashboardCache.delete(key);
-  console.log(`🗑️ Dashboard cache invalidated for user ${userId}`);
-};
 
 /**
  * Helper: Get timezone-aware day boundaries
@@ -289,7 +274,6 @@ export const createItem = async (req, res) => {
       await savedItem.save();
     }
 
-    // ✅ Invalidate dashboard cache on create
     invalidateDashboardCache(req.user._id);
 
     return res.status(201).json({ success: true, item: savedItem });
@@ -383,13 +367,10 @@ export const updateItem = async (req, res) => {
 
     const updatedItem = await item.save();
 
-    // ✅ Invalidate dashboard cache on update
     invalidateDashboardCache(req.user._id);
 
-    // Send response immediately
     res.status(200).json({ success: true, item: updatedItem });
 
-    // ✅ Background Google Calendar sync
     if (updatedItem.type === 'Event' && updatedItem.status === 'active') {
       setImmediate(async () => {
         try {
@@ -446,7 +427,6 @@ export const deleteItem = async (req, res) => {
 
     await item.deleteOne();
     
-    // ✅ Invalidate dashboard cache on delete
     invalidateDashboardCache(req.user._id);
     
     console.log('🗑️ Item permanently deleted:', req.params.id);
@@ -525,7 +505,6 @@ export const updateItemStatus = async (req, res) => {
 
     const updatedItem = await item.save();
 
-    // ✅ Invalidate dashboard cache on status update
     invalidateDashboardCache(req.user._id);
 
     return res.status(200).json({ success: true, item: updatedItem });
@@ -540,7 +519,7 @@ export const updateItemStatus = async (req, res) => {
 };
 
 /**
- * @desc    Confirm item (voice flow) - Optimized with findOneAndUpdate
+ * @desc    Confirm item (voice flow)
  * @route   POST /api/v1/items/confirm
  */
 export const confirmItem = async (req, res) => {
@@ -564,7 +543,6 @@ export const confirmItem = async (req, res) => {
     }
 
     if (action === 'cancel') {
-      // ✅ Optimized: findOneAndUpdate for cancel
       const updatedItem = await Item.findOneAndUpdate(
         {
           _id: itemId,
@@ -597,7 +575,6 @@ export const confirmItem = async (req, res) => {
     }
 
     if (action === 'save') {
-      // ✅ Build update object
       const updateData = {
         status: 'active',
       };
@@ -611,7 +588,6 @@ export const confirmItem = async (req, res) => {
         });
       }
 
-      // ✅ Optimized: findOneAndUpdate for save
       const updatedItem = await Item.findOneAndUpdate(
         {
           _id: itemId,
@@ -636,13 +612,10 @@ export const confirmItem = async (req, res) => {
 
       console.log('✅ Item confirmed:', updatedItem._id);
 
-      // ✅ Invalidate dashboard cache
       invalidateDashboardCache(req.user._id);
 
-      // Send response immediately
       res.status(200).json({ success: true, item: updatedItem });
 
-      // ✅ Background Google Calendar sync
       if (updatedItem.type === 'Event') {
         setImmediate(async () => {
           try {
@@ -838,7 +811,6 @@ export const toggleSubtask = async (req, res) => {
 
     const updated = await item.save();
 
-    // ✅ Invalidate dashboard cache on subtask toggle
     invalidateDashboardCache(req.user._id);
 
     return res.status(200).json({ success: true, item: updated });
@@ -847,6 +819,174 @@ export const toggleSubtask = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to toggle subtask',
+      errorCode: 'INTERNAL_ERROR',
+    });
+  }
+};
+
+// ============================================================
+// ✅ OVERDUE ITEMS - ALL TYPES (Task, Event, Reminder)
+// ============================================================
+
+/**
+ * @desc    Get all overdue items (all types)
+ * @route   GET /api/v1/items/overdue
+ * @access  Private
+ */
+export const getOverdueItems = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
+    }
+
+    const now = new Date();
+    const notExpiredClause = {
+      $or: [
+        { deleteAfter: null },
+        { deleteAfter: { $exists: false } },
+        { deleteAfter: { $gt: now } },
+      ],
+    };
+
+    const overdueItems = await Item.find({
+      userId: req.user._id,
+      status: 'active',
+      startTime: { $lt: now },
+      ...notExpiredClause,
+    })
+      .select('title type startTime priority createdAt')
+      .sort({ startTime: 1 })
+      .lean();
+
+    const grouped = {
+      Task: overdueItems.filter(i => i.type === 'Task'),
+      Event: overdueItems.filter(i => i.type === 'Event'),
+      Reminder: overdueItems.filter(i => i.type === 'Reminder'),
+    };
+
+    return res.status(200).json({
+      success: true,
+      items: overdueItems,
+      count: overdueItems.length,
+      grouped: grouped,
+    });
+  } catch (error) {
+    console.error('❌ Get overdue items error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server Error',
+      errorCode: 'INTERNAL_ERROR',
+    });
+  }
+};
+
+/**
+ * @desc    Complete any overdue item
+ * @route   POST /api/v1/items/overdue/:id/complete
+ * @access  Private
+ */
+export const completeOverdueItem = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
+    }
+
+    const item = await Item.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Item not found',
+        errorCode: 'NOT_FOUND',
+      });
+    }
+
+    item.status = 'completed';
+    item.completedAt = new Date();
+    await item.save();
+
+    invalidateDashboardCache(req.user._id);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Item completed successfully',
+      item,
+    });
+  } catch (error) {
+    console.error('❌ Complete overdue item error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server Error',
+      errorCode: 'INTERNAL_ERROR',
+    });
+  }
+};
+
+/**
+ * @desc    Reschedule any overdue item
+ * @route   POST /api/v1/items/overdue/:id/reschedule
+ * @access  Private
+ */
+export const rescheduleOverdueItem = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
+    }
+
+    const { startTime } = req.body;
+
+    if (!startTime) {
+      return res.status(400).json({
+        success: false,
+        message: 'Start time is required',
+        errorCode: 'MISSING_START_TIME',
+      });
+    }
+
+    const item = await Item.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Item not found',
+        errorCode: 'NOT_FOUND',
+      });
+    }
+
+    item.startTime = new Date(startTime);
+    item.status = 'active';
+    await item.save();
+
+    invalidateDashboardCache(req.user._id);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Item rescheduled successfully',
+      item,
+    });
+  } catch (error) {
+    console.error('❌ Reschedule overdue item error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server Error',
       errorCode: 'INTERNAL_ERROR',
     });
   }
@@ -863,4 +1003,7 @@ export default {
   sendReminder,
   getExpiredItems,
   toggleSubtask,
+  getOverdueItems,
+  completeOverdueItem,
+  rescheduleOverdueItem,
 };

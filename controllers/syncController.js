@@ -1,5 +1,6 @@
 import GoogleAdapter from '../services/GoogleAdapter.js';
 import Item from '../models/Item.js';
+import User from '../models/User.js'; // ✅ Added missing import
 
 /**
  * Sync an item to Google
@@ -37,7 +38,6 @@ export const syncToGoogle = async (req, res) => {
     let result;
 
     if (type === 'task' || item.type === 'Task') {
-      // Sync as Google Task
       result = await GoogleAdapter.createGoogleTask(req.user._id, {
         title: item.title,
         description: item.content,
@@ -45,7 +45,6 @@ export const syncToGoogle = async (req, res) => {
         subtasks: item.subtasks?.map(s => s.text) || [],
       });
     } else if (type === 'event' || item.type === 'Event') {
-      // Sync as Google Calendar Event
       result = await GoogleAdapter.createCalendarEvent(req.user._id, {
         title: item.title,
         description: item.content,
@@ -62,7 +61,6 @@ export const syncToGoogle = async (req, res) => {
     }
 
     if (result.success) {
-      // Update item with sync info
       if (result.googleEventId) {
         item.googleEventId = result.googleEventId;
         item.isSynced = true;
@@ -133,6 +131,13 @@ export const syncAllToGoogle = async (req, res) => {
             item.isSynced = true;
             await item.save();
             results.synced++;
+          } else {
+            results.failed++;
+            results.errors.push({
+              itemId: item._id,
+              title: item.title,
+              error: result.error,
+            });
           }
         } else if (item.type === 'Event') {
           result = await GoogleAdapter.createCalendarEvent(req.user._id, {
@@ -148,6 +153,13 @@ export const syncAllToGoogle = async (req, res) => {
             item.isSynced = true;
             await item.save();
             results.synced++;
+          } else {
+            results.failed++;
+            results.errors.push({
+              itemId: item._id,
+              title: item.title,
+              error: result.error,
+            });
           }
         }
       } catch (error) {
@@ -186,6 +198,7 @@ export const getSyncStatus = async (req, res) => {
       });
     }
 
+    // ✅ User is now properly imported
     const user = await User.findById(req.user._id);
     const isConnected = !!(user?.googleAccessToken);
 

@@ -1,5 +1,6 @@
 import Item from '../models/Item.js';
 import { generateBriefingTextService } from '../services/aiService.js';
+import { fetchGoogleCalendarEvents } from '../services/calendarService.js';
 import { DateTime } from 'luxon';
 
 function getDayBoundaries(timezone) {
@@ -23,6 +24,35 @@ const summaryCache = new Map();
 const CACHE_TTL_MS = 30 * 1000;
 const SUMMARY_TTL_MS = 5 * 60 * 1000; // 5 minutes for AI summary
 
+// ✅ Export cache for invalidation from other controllers
+export const invalidateDashboardCache = (userId) => {
+  if (!userId) return;
+  
+  const userIdStr = userId.toString ? userId.toString() : String(userId);
+  let invalidated = 0;
+  
+  // Invalidate all timezone variants for this user
+  for (const key of dashboardCache.keys()) {
+    if (key.startsWith(`${userIdStr}:`)) {
+      dashboardCache.delete(key);
+      invalidated++;
+    }
+  }
+  
+  // Also invalidate summary cache
+  for (const key of summaryCache.keys()) {
+    if (key.startsWith(`${userIdStr}:`)) {
+      summaryCache.delete(key);
+      invalidated++;
+    }
+  }
+  
+  if (invalidated > 0) {
+    console.log(`🗑️ Dashboard cache invalidated for user ${userIdStr} (${invalidated} entries)`);
+  }
+  return invalidated;
+};
+
 // ✅ Helper to generate summary in background
 async function generateSummaryInBackground(userId, timezone, todayItems, total) {
   const cacheKey = `${userId.toString()}:${timezone}`;
@@ -37,7 +67,6 @@ async function generateSummaryInBackground(userId, timezone, todayItems, total) 
       summary = 'You have no active items. Create your first task or note!';
     }
     
-    // ✅ Store in separate summary cache
     summaryCache.set(cacheKey, {
       summary,
       timestamp: Date.now(),
@@ -46,11 +75,211 @@ async function generateSummaryInBackground(userId, timezone, todayItems, total) 
     console.log('✅ AI summary generated in background');
   } catch (error) {
     console.error('❌ Background summary generation failed:', error);
-    // Store fallback summary
     summaryCache.set(cacheKey, {
       summary: `You have ${todayItems.length} items scheduled for today.`,
       timestamp: Date.now(),
     });
+  }
+}
+
+/**
+ * ✅ Find free time windows in user's calendar for today.
+ * - Checks BOTH Google Calendar events AND existing items
+ * - Uses Luxon with the actual user timezone
+ * - Returns ALL windows found (past and future)
+ * - Each window is capped at a MAX of 60 minutes
+ * - Windows shorter than 15 minutes are dropped
+ * - Past windows are marked with isPast: true
+ */
+async function findFreeTimeWindows(userId, timezone, date) {
+  try {
+    // ✅ Use Luxon with the actual user timezone
+    const dt = DateTime.fromJSDate(date).setZone(timezone);
+    const startOfDay = dt.startOf('day').toJSDate();
+    const endOfDay = dt.endOf('day').toJSDate();
+    
+    console.log(`🔍 Finding free windows for ${timezone} from ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
+    
+    // ✅ Fetch Google Calendar events
+    const events = await fetchGoogleCalendarEvents(userId, startOfDay, endOfDay);
+    console.log(`📅 Found ${events.length} calendar events`);
+    
+    // ✅ Fetch existing items (tasks, events, reminders) for today
+    const now = new Date();
+    const notExpiredClause = {
+      $or: [
+        { deleteAfter: null },
+        { deleteAfter: { $exists: false } },
+        { deleteAfter: { $gt: now } },
+      ],
+    };
+    
+    const items = await Item.find({
+      userId,
+      status: 'active',
+      startTime: { $gte: startOfDay, $lt: endOfDay },
+      ...notExpiredClause,
+    })
+      .select('startTime endTime type title')
+      .lean();
+    
+    console.log(`📋 Found ${items.length} existing items for today`);
+    
+    // ✅ Combine all busy times (events + items)
+    const busyTimes = [];
+    
+    // Add Google Calendar events
+    events.forEach(e => {
+      if (e.startTime && e.endTime) {
+        busyTimes.push({
+          start: new Date(e.startTime),
+          end: new Date(e.endTime),
+          source: 'calendar'
+        });
+      } else if (e.startTime) {
+        // If no end time, assume 1 hour duration
+        const start = new Date(e.startTime);
+        const end = new Date(start.getTime() + 60 * 60 * 1000);
+        busyTimes.push({ start, end, source: 'calendar' });
+      }
+    });
+    
+    // Add items
+    items.forEach(item => {
+      if (item.startTime) {
+        const start = new Date(item.startTime);
+        let end;
+        if (item.endTime) {
+          end = new Date(item.endTime);
+        } else {
+          // If no end time, assume 30 minutes for tasks, 1 hour for events
+          const duration = item.type === 'Event' ? 60 : 30;
+          end = new Date(start.getTime() + duration * 60 * 1000);
+        }
+        busyTimes.push({ start, end, source: `item (${item.type})` });
+      }
+    });
+    
+    console.log(`📊 Total busy times: ${busyTimes.length} (${events.length} from calendar, ${items.length} from items)`);
+    
+    // ✅ Sort busy times by start time
+    busyTimes.sort((a, b) => a.start - b.start);
+    
+    // ✅ Merge overlapping busy times
+    const mergedBusyTimes = [];
+    for (const busy of busyTimes) {
+      if (mergedBusyTimes.length === 0) {
+        mergedBusyTimes.push(busy);
+      } else {
+        const last = mergedBusyTimes[mergedBusyTimes.length - 1];
+        if (busy.start <= last.end) {
+          // Overlapping - merge
+          last.end = new Date(Math.max(last.end, busy.end));
+        } else {
+          mergedBusyTimes.push(busy);
+        }
+      }
+    }
+    
+    console.log(`📊 After merging: ${mergedBusyTimes.length} busy periods`);
+    
+    // ✅ Find free windows (gaps between busy times)
+    const rawWindows = [];
+    let currentTime = startOfDay;
+    
+    for (const busy of mergedBusyTimes) {
+      if (busy.start > currentTime) {
+        rawWindows.push({ start: new Date(currentTime), end: new Date(busy.start) });
+      }
+      currentTime = new Date(Math.max(currentTime, busy.end));
+    }
+    
+    // Add final window after last busy period
+    if (currentTime < endOfDay) {
+      rawWindows.push({ start: new Date(currentTime), end: new Date(endOfDay) });
+    }
+    
+    // If no busy times, whole day is free
+    if (mergedBusyTimes.length === 0) {
+      rawWindows.push({ start: new Date(startOfDay), end: new Date(endOfDay) });
+    }
+    
+    console.log(`📊 Found ${rawWindows.length} raw windows before filtering`);
+    
+    // ✅ Cap each window at 60 min max, drop anything under 15 min
+    const MAX_WINDOW_MINUTES = 60;
+    const MIN_WINDOW_MINUTES = 15;
+    const now2 = new Date();
+    
+    const windows = rawWindows
+      .map(w => {
+        // Calculate duration
+        const rawDurationMinutes = (w.end - w.start) / (1000 * 60);
+        if (rawDurationMinutes < MIN_WINDOW_MINUTES) return null;
+        
+        // Cap duration at MAX_WINDOW_MINUTES
+        const cappedDuration = Math.min(rawDurationMinutes, MAX_WINDOW_MINUTES);
+        const cappedEnd = new Date(w.start.getTime() + cappedDuration * 60 * 1000);
+        
+        // Determine if this window is in the past
+        const isPast = w.end <= now2;
+        const isPartiallyPast = w.start < now2 && w.end > now2;
+        
+        let effectiveStart = w.start;
+        let effectiveEnd = cappedEnd;
+        let effectiveDuration = cappedDuration;
+        let isPastFlag = false;
+        
+        if (isPartiallyPast) {
+          // Window started in the past but ends in the future
+          effectiveStart = now2;
+          const remainingDuration = (w.end - now2) / (1000 * 60);
+          effectiveDuration = Math.min(remainingDuration, MAX_WINDOW_MINUTES);
+          effectiveEnd = new Date(effectiveStart.getTime() + effectiveDuration * 60 * 1000);
+          if (effectiveDuration < MIN_WINDOW_MINUTES) return null;
+          isPastFlag = false; // Still has future time
+        } else if (isPast) {
+          isPastFlag = true;
+        }
+        
+        return {
+          start: effectiveStart,
+          end: effectiveEnd,
+          duration: Math.floor(effectiveDuration),
+          isPast: isPastFlag,
+          rawStart: w.start,
+          rawEnd: w.end,
+          rawDuration: Math.floor(rawDurationMinutes),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start - b.start);
+    
+    // Format for response
+    const result = windows.map(w => ({
+      start: w.start.toISOString(),
+      end: w.end.toISOString(),
+      duration: w.duration,
+      startTime: w.start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      endTime: w.end.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      isPast: w.isPast || w.end <= new Date(),
+      rawDuration: w.rawDuration,
+    }));
+    
+    const futureCount = result.filter(w => !w.isPast).length;
+    const pastCount = result.filter(w => w.isPast).length;
+    
+    console.log(`✅ Returning ${result.length} windows (${pastCount} past, ${futureCount} future)`);
+    if (result.length > 0) {
+      result.forEach((w, i) => {
+        console.log(`  Window ${i+1}: ${w.startTime} - ${w.endTime} (${w.duration} min, ${w.isPast ? 'past' : 'future'})`);
+      });
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('❌ Error finding free time:', error);
+    return [];
   }
 }
 
@@ -69,7 +298,6 @@ export const getDashboard = async (req, res) => {
     const timezone = req.query.timezone || 'UTC';
     const cacheKey = `${userId.toString()}:${timezone}`;
 
-    // ✅ Check if we have cached summary
     const cachedSummary = summaryCache.get(cacheKey);
     let summary = 'Good morning! You have no items scheduled for today.';
     
@@ -78,12 +306,11 @@ export const getDashboard = async (req, res) => {
       console.log('📦 Using cached summary');
     }
 
-    // ✅ Check dashboard data cache
     const cached = dashboardCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return res.status(200).json({ 
         ...cached.data, 
-        summary, // ✅ Use cached summary
+        summary,
         fromCache: true 
       });
     }
@@ -103,7 +330,6 @@ export const getDashboard = async (req, res) => {
     const activeFilter = { userId, status: 'active', ...notExpiredClause };
     const LIST_FIELDS = 'title type status startTime endTime isClientBooking clientName subtasks createdAt';
 
-    // ✅ Run all queries concurrently
     const [
       todayItems,
       total,
@@ -121,7 +347,7 @@ export const getDashboard = async (req, res) => {
           { startTime: { $gte: todayUTC, $lt: tomorrowUTC } },
           { startTime: null, createdAt: { $gte: todayUTC, $lt: tomorrowUTC } },
         ],
-      }).select(LIST_FIELDS).sort({ startTime: 1 }).limit(10).lean(),
+      }).select(LIST_FIELDS).sort({ startTime: 1 }).limit(20).lean(),
 
       Item.countDocuments(activeFilter),
       Item.countDocuments({ ...activeFilter, type: 'Task' }),
@@ -133,7 +359,7 @@ export const getDashboard = async (req, res) => {
       Item.find({
         ...activeFilter,
         startTime: { $gte: tomorrowUTC, $lt: nextWeek },
-      }).select(LIST_FIELDS).sort({ startTime: 1 }).limit(10).lean(),
+      }).select(LIST_FIELDS).sort({ startTime: 1 }).limit(20).lean(),
 
       Item.find({ userId, status: 'completed', ...notExpiredClause })
         .select('title type completedAt')
@@ -142,13 +368,34 @@ export const getDashboard = async (req, res) => {
         .lean(),
     ]);
 
+    // ✅ FIND OVERDUE ITEMS - ALL TYPES (Task, Event, Reminder)
+    const nowUTC = new Date();
+    const overdueItems = await Item.find({
+      userId,
+      status: 'active',
+      startTime: { $lt: nowUTC },
+      ...notExpiredClause,
+    })
+      .select('title type startTime priority createdAt')
+      .sort({ startTime: 1 })
+      .lean();
+
+    const overdueByType = {
+      Task: overdueItems.filter(i => i.type === 'Task'),
+      Event: overdueItems.filter(i => i.type === 'Event'),
+      Reminder: overdueItems.filter(i => i.type === 'Reminder'),
+    };
+
+    const totalOverdue = overdueItems.length;
+
+    // ✅ Find ALL free time windows for today (checking both calendar AND items)
+    const todayDate = new Date();
+    const freeWindows = await findFreeTimeWindows(userId, timezone, todayDate);
+
     const stats = { total, tasks, events, notes, reminders, completed, expired: 0 };
 
-    // ✅ If no cached summary, generate one in background (non-blocking)
     if (!cachedSummary || Date.now() - cachedSummary.timestamp >= SUMMARY_TTL_MS) {
-      // ✅ Fire and forget - don't await
       generateSummaryInBackground(userId, timezone, todayItems, total);
-      // Use fallback summary for this request
       if (todayItems.length > 0) {
         summary = `You have ${todayItems.length} items scheduled for today.`;
       } else if (total > 0) {
@@ -164,15 +411,18 @@ export const getDashboard = async (req, res) => {
       upcomingItems,
       recentCompleted,
       hasTodayItems: todayItems.length > 0,
+      overdueItems: overdueItems || [],
+      overdueCount: totalOverdue || 0,
+      overdueByType: overdueByType,
+      freeWindows: freeWindows || [],
     };
 
-    // ✅ Cache dashboard data
     dashboardCache.set(cacheKey, { 
       data: responseData, 
       timestamp: Date.now() 
     });
 
-    console.log(`📊 Dashboard: ${todayItems.length} today, ${total} total`);
+    console.log(`📊 Dashboard: ${todayItems.length} today, ${total} total, ${totalOverdue} overdue, ${freeWindows.length} free windows`);
     
     res.status(200).json(responseData);
   } catch (error) {

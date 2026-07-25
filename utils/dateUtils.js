@@ -14,11 +14,13 @@ function parseDateString(dateStr, timezone) {
   // Clean ordinal suffixes (th, st, nd, rd) from dates
   let cleanedDateStr = dateStr.replace(/(\d+)(st|nd|rd|th)/, '$1');
 
-  // Relative dates
+  // ✅ Relative dates - FIXED: Added 'next week' and 'this week'
   const relativeMap = {
     'today': now.startOf('day'),
     'tomorrow': now.plus({ days: 1 }).startOf('day'),
     'yesterday': now.minus({ days: 1 }).startOf('day'),
+    'next week': now.plus({ weeks: 1 }).startOf('day'),
+    'this week': now.startOf('day'),
   };
 
   if (relativeMap[lower]) {
@@ -108,7 +110,7 @@ function parseTimeString(timeStr) {
   if (trimmed === 'noon') return { hours: 12, minutes: 0 };
   if (trimmed === 'midnight') return { hours: 0, minutes: 0 };
 
-  // ✅ HH:MM format (24-hour)
+  // HH:MM format (24-hour)
   const match24 = trimmed.match(/^(\d{1,2}):(\d{2})$/);
   if (match24) {
     const result = { hours: parseInt(match24[1]), minutes: parseInt(match24[2]) };
@@ -116,7 +118,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // ✅ 12-hour format with AM/PM
+  // 12-hour format with AM/PM
   const match12 = trimmed.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
   if (match12) {
     let hours = parseInt(match12[1]);
@@ -129,7 +131,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // ✅ Just a number (e.g., "7" → 7:00) - FIXED to handle AM/PM based on context
+  // Just a number (e.g., "7" → 7:00)
   const matchHour = trimmed.match(/^(\d{1,2})$/);
   if (matchHour) {
     let hours = parseInt(matchHour[1]);
@@ -140,7 +142,6 @@ function parseTimeString(timeStr) {
       return result;
     }
     // If hours < 6, assume PM (evening) for better UX
-    // This is a heuristic - if someone says "7" they usually mean 7 PM
     if (hours >= 1 && hours <= 6) {
       hours += 12;
       console.log(`✅ Parsed as PM: ${hours}:00 (assumed PM for ${hours-12})`);
@@ -150,7 +151,7 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // ✅ "7pm" without space
+  // "7pm" without space
   const matchNoSpace = trimmed.match(/^(\d{1,2})(am|pm)$/);
   if (matchNoSpace) {
     let hours = parseInt(matchNoSpace[1]);
@@ -162,11 +163,10 @@ function parseTimeString(timeStr) {
     return result;
   }
 
-  // ✅ "7 o'clock" or "7 o clock"
+  // "7 o'clock" or "7 o clock"
   const matchOClock = trimmed.match(/^(\d{1,2})\s*o'?clock$/);
   if (matchOClock) {
     let hours = parseInt(matchOClock[1]);
-    // Assume PM if hours < 6 (heuristic)
     if (hours >= 1 && hours <= 6) {
       hours += 12;
     }
@@ -298,7 +298,6 @@ export function parseDateTime(dateStr, timeStr, timezone) {
       console.warn(`⚠️ Could not parse time: "${timeStr}"`);
     }
   } else {
-    // ✅ If no time specified, default to 9:00 AM
     console.log('⏰ No time specified, defaulting to 9:00 AM');
     dt = dt.set({ hour: 9, minute: 0 });
   }
@@ -306,7 +305,6 @@ export function parseDateTime(dateStr, timeStr, timezone) {
   // Ensure date is in the future (for relative dates like "Friday")
   const now = DateTime.now().setZone(timezone);
   if (dt < now.startOf('day')) {
-    // If parsed date is in the past, add 7 days (next occurrence)
     dt = dt.plus({ days: 7 });
     console.log(`📅 Date was in the past, moved to next occurrence: ${dt.toISO()}`);
   }
@@ -327,7 +325,6 @@ export function calculateEndTime(startTime, endTimeStr, durationStr, timezone) {
   const start = new Date(startTime);
   console.log(`⏱️ Calculating end time from start: ${start.toISOString()}`);
 
-  // If endTime is provided, parse it
   if (endTimeStr) {
     const endDate = parseDateTime(
       start.toISOString().split('T')[0],
@@ -340,7 +337,6 @@ export function calculateEndTime(startTime, endTimeStr, durationStr, timezone) {
     }
   }
 
-  // If duration is provided, calculate
   if (durationStr) {
     const minutes = parseDuration(durationStr);
     if (minutes) {
@@ -351,7 +347,6 @@ export function calculateEndTime(startTime, endTimeStr, durationStr, timezone) {
     }
   }
 
-  // Default: 30 minutes
   const end = new Date(start);
   end.setMinutes(end.getMinutes() + 30);
   console.log(`✅ End time default (30min): ${end.toISOString()}`);
