@@ -86,10 +86,9 @@ async function generateSummaryInBackground(userId, timezone, todayItems, total) 
  * ✅ Find free time windows in user's calendar for today.
  * - Checks BOTH Google Calendar events AND existing items
  * - Uses Luxon with the actual user timezone
- * - Returns ALL windows found (past and future)
+ * - Returns ONLY FUTURE windows (from current time onwards)
  * - Each window is capped at a MAX of 60 minutes
  * - Windows shorter than 15 minutes are dropped
- * - Past windows are marked with isPast: true
  */
 async function findFreeTimeWindows(userId, timezone, date) {
   try {
@@ -97,15 +96,16 @@ async function findFreeTimeWindows(userId, timezone, date) {
     const dt = DateTime.fromJSDate(date).setZone(timezone);
     const startOfDay = dt.startOf('day').toJSDate();
     const endOfDay = dt.endOf('day').toJSDate();
+    const now = new Date();
     
     console.log(`🔍 Finding free windows for ${timezone} from ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
+    console.log(`🕐 Current time: ${now.toLocaleTimeString()}`);
     
     // ✅ Fetch Google Calendar events
     const events = await fetchGoogleCalendarEvents(userId, startOfDay, endOfDay);
     console.log(`📅 Found ${events.length} calendar events`);
     
     // ✅ Fetch existing items (tasks, events, reminders) for today
-    const now = new Date();
     const notExpiredClause = {
       $or: [
         { deleteAfter: null },
@@ -127,31 +127,33 @@ async function findFreeTimeWindows(userId, timezone, date) {
     
     // Log item details for debugging
     items.forEach((item, index) => {
-      const start = item.startTime ? new Date(item.startTime).toLocaleString() : 'no start';
-      const end = item.endTime ? new Date(item.endTime).toLocaleString() : 'not set';
+      const start = item.startTime ? new Date(item.startTime).toLocaleTimeString() : 'no start';
+      const end = item.endTime ? new Date(item.endTime).toLocaleTimeString() : 'not set';
       console.log(`  Item ${index + 1}: ${item.title} - ${start} to ${end}`);
     });
     
-    // ✅ Combine all busy times (events + items)
+    // ✅ Combine all busy times (events + items) - ONLY FUTURE ONES
     const busyTimes = [];
     
-    // Add Google Calendar events
+    // Add Google Calendar events (only if in future)
     events.forEach(e => {
       if (e.startTime && e.endTime) {
         const start = new Date(e.startTime);
         const end = new Date(e.endTime);
-        // Only add if end is after start
-        if (end > start) {
+        // Only add if end is after current time
+        if (end > start && end > now) {
           busyTimes.push({ start, end, source: 'calendar' });
         }
       } else if (e.startTime) {
         const start = new Date(e.startTime);
         const end = new Date(start.getTime() + 60 * 60 * 1000);
-        busyTimes.push({ start, end, source: 'calendar' });
+        if (end > now) {
+          busyTimes.push({ start, end, source: 'calendar' });
+        }
       }
     });
     
-    // Add items with validation
+    // Add items with validation (only if in future)
     items.forEach(item => {
       if (item.startTime) {
         const start = new Date(item.startTime);
@@ -160,8 +162,6 @@ async function findFreeTimeWindows(userId, timezone, date) {
           end = new Date(item.endTime);
           // ✅ Validate that end is after start
           if (end <= start) {
-            // If end is invalid, set a default duration
-            console.log(`  ⚠️ Invalid end time for "${item.title}" (${end.toLocaleString()} <= ${start.toLocaleString()}), using default duration`);
             const duration = item.type === 'Event' ? 60 : 30;
             end = new Date(start.getTime() + duration * 60 * 1000);
           }
@@ -169,27 +169,28 @@ async function findFreeTimeWindows(userId, timezone, date) {
           const duration = item.type === 'Event' ? 60 : 30;
           end = new Date(start.getTime() + duration * 60 * 1000);
         }
-        busyTimes.push({ start, end, source: `item (${item.type})` });
-        console.log(`  Busy: ${item.title} - ${start.toLocaleTimeString()} to ${end.toLocaleTimeString()}`);
+        // Only add if end is in the future
+        if (end > now) {
+          busyTimes.push({ start, end, source: `item (${item.type})` });
+          console.log(`  Busy: ${item.title} - ${start.toLocaleTimeString()} to ${end.toLocaleTimeString()}`);
+        }
       }
     });
     
-    console.log(`📊 Total busy times: ${busyTimes.length}`);
+    console.log(`📊 Total busy times (future only): ${busyTimes.length}`);
     
-    // If no busy times, return empty (no busy periods means no windows)
+    // If no busy times, whole day from now is free
     if (busyTimes.length === 0) {
-      // Whole day is free
-      console.log('📊 No busy times - whole day is free');
+      console.log('📊 No busy times - whole day from now is free');
       const result = [{
-        start: startOfDay.toISOString(),
+        start: now.toISOString(),
         end: endOfDay.toISOString(),
-        duration: 60,
-        startTime: startOfDay.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        duration: Math.min(60, (endOfDay - now) / (1000 * 60)),
+        startTime: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
         endTime: endOfDay.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
         isPast: false,
-        rawDuration: 1440,
+        rawDuration: Math.floor((endOfDay - now) / (1000 * 60)),
       }];
-      // Split into 60-min windows
       return splitIntoHourlyWindows(result);
     }
     
@@ -216,13 +217,13 @@ async function findFreeTimeWindows(userId, timezone, date) {
       console.log(`  Busy ${i+1}: ${busy.start.toLocaleTimeString()} - ${busy.end.toLocaleTimeString()}`);
     });
     
-    // ✅ Find free windows (gaps between busy times)
+    // ✅ Find free windows - START FROM CURRENT TIME, NOT START OF DAY
     const rawWindows = [];
-    let currentTime = startOfDay;
+    let currentTime = now; // ✅ Start from current time
     
     // Check gaps between busy periods
     for (const busy of mergedBusyTimes) {
-      // Gap before this busy period
+      // Gap before this busy period (only if after current time)
       if (busy.start > currentTime) {
         const duration = (busy.start - currentTime) / (1000 * 60);
         if (duration >= 15) {
@@ -243,7 +244,7 @@ async function findFreeTimeWindows(userId, timezone, date) {
       }
     }
     
-    console.log(`📊 Found ${rawWindows.length} raw windows`);
+    console.log(`📊 Found ${rawWindows.length} raw windows (after current time)`);
     rawWindows.forEach((w, i) => {
       const duration = (w.end - w.start) / (1000 * 60);
       console.log(`  Raw window ${i+1}: ${w.start.toLocaleTimeString()} - ${w.end.toLocaleTimeString()} (${Math.floor(duration)} min)`);
@@ -256,7 +257,7 @@ async function findFreeTimeWindows(userId, timezone, date) {
       duration: Math.floor((w.end - w.start) / (1000 * 60)),
       startTime: w.start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       endTime: w.end.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      isPast: w.end <= new Date(),
+      isPast: false, // All windows are from current time onwards
       rawDuration: Math.floor((w.end - w.start) / (1000 * 60)),
     }));
     
@@ -309,14 +310,15 @@ function splitIntoHourlyWindows(windows) {
         isPastFlag = false;
       }
       
-      if (effectiveDuration >= MIN_WINDOW_MINUTES) {
+      // ✅ Skip if duration is less than MIN or if window is in the past
+      if (effectiveDuration >= MIN_WINDOW_MINUTES && !isPastFlag) {
         result.push({
           start: effectiveStart.toISOString(),
           end: effectiveEnd.toISOString(),
           duration: Math.floor(effectiveDuration),
           startTime: effectiveStart.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
           endTime: effectiveEnd.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          isPast: isPastFlag,
+          isPast: false,
           rawDuration: Math.floor(effectiveDuration),
         });
       }
