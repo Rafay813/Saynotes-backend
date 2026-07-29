@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import User from "../models/User.js";
+import Item from "../models/Item.js";
 
 // ✅ Initialize OAuth2 client
 const oauth2Client = new google.auth.OAuth2(
@@ -16,6 +17,7 @@ const calendar = google.calendar({
 
 /**
  * Get Google Calendar events for a user
+ * ✅ FIXED: Returns raw Google events WITHOUT creating duplicates
  */
 export const fetchGoogleCalendarEvents = async (userId, startDate, endDate) => {
   try {
@@ -44,7 +46,6 @@ export const fetchGoogleCalendarEvents = async (userId, startDate, endDate) => {
 
     return events.map((event) => ({
       googleEventId: event.id,
-      // ✅ Use the actual event title from Google Calendar
       title: event.summary || "Untitled Event",
       content: event.description || "",
       startTime: event.start?.dateTime || event.start?.date,
@@ -69,7 +70,103 @@ export const fetchGoogleCalendarEvents = async (userId, startDate, endDate) => {
 };
 
 /**
- * Sync a local event with Google Calendar
+ * ✅ NEW: Sync Google Calendar events to database WITHOUT duplicates
+ * This should be called periodically (e.g., on dashboard load)
+ */
+export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => {
+  try {
+    console.log(`🔄 Syncing Google Calendar events for user ${userId}`);
+    
+    // Fetch raw Google events
+    const googleEvents = await fetchGoogleCalendarEvents(userId, startDate, endDate);
+    if (googleEvents.length === 0) {
+      console.log('📭 No Google events to sync');
+      return { added: 0, updated: 0, deleted: 0 };
+    }
+
+    // ✅ Get existing events with googleEventId
+    const existingEvents = await Item.find({
+      userId: userId,
+      googleEventId: { $ne: null },
+      type: 'Event',
+    }).select('googleEventId title startTime endTime status').lean();
+
+    const existingMap = new Map();
+    existingEvents.forEach(e => existingMap.set(e.googleEventId, e));
+
+    let added = 0;
+    let updated = 0;
+    let deleted = 0;
+
+    // ✅ Process each Google event
+    for (const googleEvent of googleEvents) {
+      const existing = existingMap.get(googleEvent.googleEventId);
+
+      if (!existing) {
+        // ✅ NEW EVENT - Create it
+        await Item.create({
+          userId: userId,
+          type: 'Event',
+          title: googleEvent.title,
+          content: googleEvent.content || `Google Calendar Event: ${googleEvent.title}`,
+          startTime: googleEvent.startTime ? new Date(googleEvent.startTime) : null,
+          endTime: googleEvent.endTime ? new Date(googleEvent.endTime) : null,
+          location: googleEvent.location || null,
+          status: googleEvent.status === 'cancelled' ? 'cancelled' : 'active',
+          googleEventId: googleEvent.googleEventId,
+          isSynced: true,
+          category: 'Google Calendar',
+          priority: 'medium',
+        });
+        added++;
+        console.log(`✅ Added Google event: ${googleEvent.title}`);
+      } else {
+        // ✅ EXISTING EVENT - Check if updated
+        const needsUpdate = 
+          existing.title !== googleEvent.title ||
+          (existing.startTime?.toString() !== (googleEvent.startTime ? new Date(googleEvent.startTime).toString() : null)) ||
+          (existing.endTime?.toString() !== (googleEvent.endTime ? new Date(googleEvent.endTime).toString() : null)) ||
+          existing.location !== googleEvent.location ||
+          existing.status !== (googleEvent.status === 'cancelled' ? 'cancelled' : 'active');
+
+        if (needsUpdate) {
+          await Item.findByIdAndUpdate(existing._id, {
+            title: googleEvent.title,
+            content: googleEvent.content || `Google Calendar Event: ${googleEvent.title}`,
+            startTime: googleEvent.startTime ? new Date(googleEvent.startTime) : null,
+            endTime: googleEvent.endTime ? new Date(googleEvent.endTime) : null,
+            location: googleEvent.location || null,
+            status: googleEvent.status === 'cancelled' ? 'cancelled' : 'active',
+          });
+          updated++;
+          console.log(`🔄 Updated Google event: ${googleEvent.title}`);
+        }
+      }
+    }
+
+    // ✅ Delete events that no longer exist in Google Calendar
+    const googleEventIds = new Set(googleEvents.map(e => e.googleEventId));
+    const eventsToDelete = existingEvents.filter(e => !googleEventIds.has(e.googleEventId));
+    
+    if (eventsToDelete.length > 0) {
+      await Item.deleteMany({
+        _id: { $in: eventsToDelete.map(e => e._id) }
+      });
+      deleted = eventsToDelete.length;
+      console.log(`🗑️ Deleted ${deleted} events no longer in Google Calendar`);
+    }
+
+    console.log(`📊 Sync complete: +${added} added, 🔄${updated} updated, 🗑️${deleted} deleted`);
+    return { added, updated, deleted };
+
+  } catch (error) {
+    console.error('❌ Google Calendar sync to database error:', error.message);
+    return { added: 0, updated: 0, deleted: 0 };
+  }
+};
+
+/**
+ * Sync a local item with Google Calendar
  */
 export const syncWithGoogleCalendar = async (item) => {
   try {
@@ -84,7 +181,9 @@ export const syncWithGoogleCalendar = async (item) => {
       refresh_token: user.googleRefreshToken,
     });
 
+    // ✅ Check if we have a googleEventId
     if (item.googleEventId) {
+      // ✅ Update existing event
       const response = await calendar.events.update({
         calendarId: "primary",
         eventId: item.googleEventId,
@@ -95,13 +194,13 @@ export const syncWithGoogleCalendar = async (item) => {
             dateTime: item.startTime
               ? new Date(item.startTime).toISOString()
               : null,
-            timeZone: user.timezone || "UTC",
+            timeZone: user.timezone || "Asia/Karachi",
           },
           end: {
             dateTime: item.endTime
               ? new Date(item.endTime).toISOString()
               : null,
-            timeZone: user.timezone || "UTC",
+            timeZone: user.timezone || "Asia/Karachi",
           },
           location: item.location || "",
         },
@@ -110,6 +209,7 @@ export const syncWithGoogleCalendar = async (item) => {
       console.log("✅ Google Calendar event updated:", response.data.id);
       return { googleEventId: response.data.id };
     } else {
+      // ✅ Create new event
       const response = await calendar.events.insert({
         calendarId: "primary",
         requestBody: {
@@ -119,13 +219,13 @@ export const syncWithGoogleCalendar = async (item) => {
             dateTime: item.startTime
               ? new Date(item.startTime).toISOString()
               : null,
-            timeZone: user.timezone || "UTC",
+            timeZone: user.timezone || "Asia/Karachi",
           },
           end: {
             dateTime: item.endTime
               ? new Date(item.endTime).toISOString()
               : null,
-            timeZone: user.timezone || "UTC",
+            timeZone: user.timezone || "Asia/Karachi",
           },
           location: item.location || "",
         },
@@ -174,11 +274,9 @@ export const deleteGoogleCalendarEvent = async (googleEventId, userId) => {
 export const getGoogleAuthUrl = (userId) => {
   const scopes = [
     "https://www.googleapis.com/auth/calendar",
-
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/tasks",
-
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
   ];
@@ -209,6 +307,7 @@ export const exchangeAuthCode = async (code) => {
 
 export default {
   fetchGoogleCalendarEvents,
+  syncGoogleEventsToDatabase,
   syncWithGoogleCalendar,
   deleteGoogleCalendarEvent,
   getGoogleAuthUrl,
