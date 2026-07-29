@@ -62,7 +62,7 @@ export const processVoice = async (req, res) => {
     const classified = await aiParsingService(transcript);
     console.log(`🤖 Classified: ${Date.now() - startTime}ms`);
 
-    // Step 3: Parse Date/Time - FIXED with current time + 3 hours default
+    // ✅ Step 3: Parse Date/Time - FIXED with future time default
     let startTimeParsed = null;
     let endTime = null;
 
@@ -71,23 +71,25 @@ export const processVoice = async (req, res) => {
 
     let dateToUse = classified.date;
 
-    // ✅ If we have time but no date, default to "today"
-    if (!dateToUse && classified.time) {
+    // ✅ If AI detected a specific date (like "in 24 days"), use it!
+    if (dateToUse && dateToUse !== 'today' && dateToUse !== 'tomorrow') {
+      console.log(`📅 Using detected date: "${dateToUse}"`);
+    } else if (!dateToUse && classified.time) {
       dateToUse = 'today';
       console.log('📅 No date provided, defaulting to "today"');
     }
 
-    // ✅ If we have date but no time, use current time + 3 hours
+    // ✅ If we have a date but no time, use current time + 3 hours (FUTURE)
     if (dateToUse && !classified.time) {
       const now = new Date();
       const threeHoursLater = new Date(now.getTime() + 3 * 60 * 60 * 1000);
       const hours = String(threeHoursLater.getHours()).padStart(2, '0');
       const minutes = String(threeHoursLater.getMinutes()).padStart(2, '0');
       classified.time = `${hours}:${minutes}`;
-      console.log(`⏰ No time provided, defaulting to current time + 3 hours: ${classified.time}`);
+      console.log(`⏰ No time provided, defaulting to future time: ${classified.time} (current time + 3 hours)`);
     }
 
-    // ✅ If no date and no time, default to today at current time + 3 hours
+    // ✅ If no date and no time, default to today at current time + 3 hours (FUTURE)
     if (!dateToUse && !classified.time) {
       dateToUse = 'today';
       const now = new Date();
