@@ -5,12 +5,10 @@ import { syncWithGoogleCalendar } from '../services/calendarService.js';
 import { parseDateTime, calculateEndTime, extractEmail, detectClientBooking } from '../utils/dateUtils.js';
 import Item from '../models/Item.js';
 import { invalidateDashboardCache } from './dashboardController.js';
+import { DateTime } from 'luxon';
 
 /**
  * Process voice input with Optimized Performance
- * - Parallel processing where possible
- * - Non-blocking Google Calendar sync
- * - Fast response time
  */
 export const processVoice = async (req, res) => {
   const startTime = Date.now();
@@ -45,7 +43,7 @@ export const processVoice = async (req, res) => {
 
     console.log('🎤 Processing voice input (optimized)...');
 
-    // ✅ Step 1: Transcribe (this is the bottleneck - we can't speed this up much)
+    // Step 1: Transcribe
     const transcription = await transcribeAudioWithGroq(req.file.buffer, req.file.mimetype);
     if (!transcription.success) {
       return res.status(400).json({
@@ -58,14 +56,14 @@ export const processVoice = async (req, res) => {
     const transcript = transcription.transcript;
     console.log(`📝 Transcript: "${transcript}" (${Date.now() - startTime}ms)`);
 
-    // ✅ Step 2: AI Classification (run in parallel with other operations)
-    const timezone = req.body.timezone || 'UTC';
+    // Step 2: AI Classification
+    const timezone = req.body.timezone || 'Asia/Karachi';
     console.log(`🌍 Timezone: ${timezone}`);
 
     const classified = await aiParsingService(transcript);
     console.log(`🤖 Classified: ${Date.now() - startTime}ms`);
 
-    // ✅ Step 3: Parse Date/Time - Fast operations
+    // ✅ Step 3: Parse Date/Time - FIXED with proper timezone handling
     let startTimeParsed = null;
     let endTime = null;
 
@@ -74,50 +72,133 @@ export const processVoice = async (req, res) => {
 
     let dateToUse = classified.date;
 
-    if (!dateToUse && classified.time) {
+    // Get current time in user's timezone
+    const nowInTimezone = DateTime.now().setZone(timezone);
+    console.log(`🕐 Current time in ${timezone}: ${nowInTimezone.toFormat('HH:mm')}`);
+
+    // ✅ If AI detected a specific date (like "in 24 days"), use it!
+    if (dateToUse && dateToUse !== 'today' && dateToUse !== 'tomorrow') {
+      console.log(`📅 Using detected date: "${dateToUse}"`);
+    } else if (!dateToUse && classified.time) {
       dateToUse = 'today';
       console.log('📅 No date provided, defaulting to "today"');
     }
 
+    // ✅ If we have a date but no time, use current time + 3 hours in user's timezone
     if (dateToUse && !classified.time) {
-      classified.time = '9:00 AM';
-      console.log('⏰ No time provided, defaulting to "9:00 AM"');
+      const futureTime = nowInTimezone.plus({ hours: 3 });
+      classified.time = futureTime.toFormat('HH:mm');
+      console.log(`⏰ No time provided, defaulting to future time: ${classified.time} (current time + 3 hours in ${timezone})`);
     }
 
+    // ✅ If no date and no time, default to today at current time + 3 hours
     if (!dateToUse && !classified.time) {
       dateToUse = 'today';
-      classified.time = '9:00 AM';
-      console.log('📅⏰ No date/time provided, defaulting to "today 9:00 AM"');
+      const futureTime = nowInTimezone.plus({ hours: 3 });
+      classified.time = futureTime.toFormat('HH:mm');
+      console.log(`📅⏰ No date/time provided, defaulting to "today" at ${classified.time} (current time + 3 hours in ${timezone})`);
     }
 
+    // ✅ Parse date and time using Luxon with proper timezone
     if (dateToUse) {
-      startTimeParsed = parseDateTime(dateToUse, classified.time, timezone);
-      console.log(`📅 Parsed startTime: ${startTimeParsed ? startTimeParsed.toISOString() : 'null'}`);
+      // Build date string for parsing
+      let dateStr = dateToUse;
+      let timeStr = classified.time || '09:00';
+      
+      // Handle relative dates
+      if (dateToUse === 'today') {
+        dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
+      } else if (dateToUse === 'tomorrow') {
+        dateStr = nowInTimezone.plus({ days: 1 }).toFormat('yyyy-MM-dd');
+      } else if (dateToUse.includes('days')) {
+        // Handle "in 24 days" type phrases
+        const daysMatch = dateToUse.match(/(\d+)/);
+        if (daysMatch) {
+          const days = parseInt(daysMatch[1]);
+          dateStr = nowInTimezone.plus({ days }).toFormat('yyyy-MM-dd');
+        }
+      } else {
+        // Try to parse as date
+        try {
+          const parsedDate = DateTime.fromFormat(dateToUse, 'yyyy-MM-dd', { zone: timezone });
+          if (parsedDate.isValid) {
+            dateStr = parsedDate.toFormat('yyyy-MM-dd');
+          }
+        } catch (e) {
+          console.log(`⚠️ Could not parse date: ${dateToUse}, using today`);
+          dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
+        }
+      }
+
+      // Parse time
+      let hour = 9;
+      let minute = 0;
+      if (timeStr) {
+        // Handle various time formats
+        if (timeStr.includes(':')) {
+          const parts = timeStr.split(':');
+          hour = parseInt(parts[0]);
+          minute = parseInt(parts[1]) || 0;
+        } else if (timeStr.toLowerCase().includes('am')) {
+          const h = parseInt(timeStr);
+          hour = h === 12 ? 0 : h;
+        } else if (timeStr.toLowerCase().includes('pm')) {
+          const h = parseInt(timeStr);
+          hour = h === 12 ? 12 : h + 12;
+        } else {
+          // Assume it's a number (e.g., "9" means 9:00)
+          const h = parseInt(timeStr);
+          if (!isNaN(h) && h >= 1 && h <= 12) {
+            hour = h;
+          }
+        }
+      }
+
+      // Create date in user's timezone
+      let dateTime = DateTime.fromObject(
+        {
+          year: parseInt(dateStr.split('-')[0]),
+          month: parseInt(dateStr.split('-')[1]),
+          day: parseInt(dateStr.split('-')[2]),
+          hour: hour,
+          minute: minute,
+          second: 0,
+          millisecond: 0,
+        },
+        { zone: timezone }
+      );
+
+      // If the time is in the past, add 1 day
+      if (dateTime < nowInTimezone) {
+        dateTime = dateTime.plus({ days: 1 });
+        console.log(`⏰ Time ${timeStr} is in the past, adjusted to tomorrow`);
+      }
+
+      startTimeParsed = dateTime.toJSDate();
+      console.log(`📅 Parsed startTime (local): ${dateTime.toFormat('yyyy-MM-dd HH:mm')}`);
+      console.log(`📅 Parsed startTime (UTC): ${startTimeParsed.toISOString()}`);
       
       if (startTimeParsed) {
-        endTime = calculateEndTime(
-          startTimeParsed,
-          classified.endTime,
-          classified.duration,
-          timezone
-        );
-        console.log(`⏱️ Parsed endTime: ${endTime ? endTime.toISOString() : 'null'}`);
+        // Calculate end time (default 30 minutes after start)
+        const endDateTime = dateTime.plus({ minutes: 30 });
+        endTime = endDateTime.toJSDate();
+        console.log(`⏱️ EndTime: ${endDateTime.toFormat('yyyy-MM-dd HH:mm')}`);
       }
     } else {
       console.warn('⚠️ No date or time extracted by AI');
     }
 
-    // ✅ Step 4: Extract Email & Detect Client - Fast operations
+    // Step 4: Extract Email & Detect Client
     const clientEmail = extractEmail(transcript);
     const isClientBooking = detectClientBooking(transcript, classified.person);
     const clientName = isClientBooking ? classified.person : null;
     console.log(`👤 Client: ${clientName || 'none'}, Booking: ${isClientBooking}`);
 
-    // ✅ Step 5: Use AI-generated title
+    // Step 5: Use AI-generated title
     const title = classified.title;
     console.log(`📝 Final title: "${title}"`);
 
-    // ✅ Step 6: Build Item Data
+    // Step 6: Build Item Data
     const itemData = {
       userId: req.user._id,
       type: classified.type || 'Note',
@@ -137,7 +218,7 @@ export const processVoice = async (req, res) => {
 
     console.log(`📦 Final item data:`, JSON.stringify(itemData, null, 2));
 
-    // ✅ Step 7: Add subtasks for Tasks
+    // Step 7: Add subtasks for Tasks
     if (classified.type === 'Task') {
       const subtaskItems = classified.items || classified.subtasks || [];
       if (subtaskItems.length > 0) {
@@ -145,19 +226,19 @@ export const processVoice = async (req, res) => {
       }
     }
 
-    // ✅ Step 8: Generate video link for client bookings
+    // Step 8: Generate video link for client bookings
     if (isClientBooking && (classified.type === 'Event' || classified.type === 'Reminder')) {
       const newId = new mongoose.Types.ObjectId();
       itemData.videoCallLink = `https://meet.jit.si/SayNote-${newId}`;
       console.log('✅ Video link generated before save');
     }
 
-    // ✅ Step 9: Create and Save Item (fast operation)
+    // Step 9: Create and Save Item
     const savedItem = await Item.create(itemData);
     invalidateDashboardCache(req.user._id);
     console.log(`✅ Item created: ${savedItem._id} (${Date.now() - startTime}ms)`);
 
-    // ✅ Step 10: REMINDER → EVENT AUTO-CREATION (only if needed)
+    // Step 10: REMINDER → EVENT AUTO-CREATION
     let linkedEvent = null;
     if (savedItem.type === 'Reminder' && savedItem.startTime) {
       console.log(`🔗 Creating linked Event from Reminder: "${savedItem.title}"`);
@@ -203,7 +284,7 @@ export const processVoice = async (req, res) => {
 
     console.log(`✅ Voice processed in ${Date.now() - startTime}ms`);
 
-    // ✅ Step 11: Send response immediately (don't wait for Google Calendar sync)
+    // Step 11: Send response immediately
     const responseData = {
       success: true,
       message: 'Voice processed successfully',
@@ -218,8 +299,7 @@ export const processVoice = async (req, res) => {
 
     res.status(201).json(responseData);
 
-    // ✅ Step 12: Background tasks - Google Calendar sync (NON-BLOCKING)
-    // These run in the background and don't affect response time
+    // Step 12: Background tasks - Google Calendar sync
     if (savedItem.type === 'Event' && savedItem.startTime && !savedItem.isLinkedEvent) {
       setImmediate(async () => {
         try {
@@ -266,7 +346,7 @@ export const processVoice = async (req, res) => {
 };
 
 /**
- * Transcribe audio only (fast path for debugging)
+ * Transcribe audio only
  */
 export const transcribeOnly = async (req, res) => {
   try {
