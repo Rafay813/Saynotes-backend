@@ -63,7 +63,7 @@ export const processVoice = async (req, res) => {
     const classified = await aiParsingService(transcript);
     console.log(`🤖 Classified: ${Date.now() - startTime}ms`);
 
-    // ✅ Step 3: Parse Date/Time - FIXED with proper timezone handling
+    // ✅ Step 3: Parse Date/Time with default = current time + 3 hours
     let startTimeParsed = null;
     let endTime = null;
 
@@ -84,11 +84,11 @@ export const processVoice = async (req, res) => {
       console.log('📅 No date provided, defaulting to "today"');
     }
 
-    // ✅ If we have a date but no time, use current time + 3 hours in user's timezone
+    // ✅ If we have a date but no time, use current time + 3 hours (FUTURE)
     if (dateToUse && !classified.time) {
       const futureTime = nowInTimezone.plus({ hours: 3 });
       classified.time = futureTime.toFormat('HH:mm');
-      console.log(`⏰ No time provided, defaulting to future time: ${classified.time} (current time + 3 hours in ${timezone})`);
+      console.log(`⏰ No time provided, defaulting to future time: ${classified.time} (current time + 3 hours)`);
     }
 
     // ✅ If no date and no time, default to today at current time + 3 hours
@@ -96,96 +96,107 @@ export const processVoice = async (req, res) => {
       dateToUse = 'today';
       const futureTime = nowInTimezone.plus({ hours: 3 });
       classified.time = futureTime.toFormat('HH:mm');
-      console.log(`📅⏰ No date/time provided, defaulting to "today" at ${classified.time} (current time + 3 hours in ${timezone})`);
+      console.log(`📅⏰ No date/time provided, defaulting to "today" at ${classified.time} (current time + 3 hours)`);
     }
 
-    // ✅ Parse date and time using Luxon with proper timezone
-    if (dateToUse) {
-      // Build date string for parsing
-      let dateStr = dateToUse;
-      let timeStr = classified.time || '09:00';
-      
-      // Handle relative dates
-      if (dateToUse === 'today') {
-        dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
-      } else if (dateToUse === 'tomorrow') {
-        dateStr = nowInTimezone.plus({ days: 1 }).toFormat('yyyy-MM-dd');
-      } else if (dateToUse.includes('days')) {
-        // Handle "in 24 days" type phrases
-        const daysMatch = dateToUse.match(/(\d+)/);
-        if (daysMatch) {
-          const days = parseInt(daysMatch[1]);
-          dateStr = nowInTimezone.plus({ days }).toFormat('yyyy-MM-dd');
-        }
-      } else {
-        // Try to parse as date
-        try {
-          const parsedDate = DateTime.fromFormat(dateToUse, 'yyyy-MM-dd', { zone: timezone });
-          if (parsedDate.isValid) {
-            dateStr = parsedDate.toFormat('yyyy-MM-dd');
-          }
-        } catch (e) {
-          console.log(`⚠️ Could not parse date: ${dateToUse}, using today`);
+    // ✅ Parse date and time
+    try {
+      if (dateToUse) {
+        let dateStr = dateToUse;
+        let timeStr = classified.time || '09:00';
+        
+        // Handle relative dates
+        if (dateToUse === 'today') {
           dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
-        }
-      }
-
-      // Parse time
-      let hour = 9;
-      let minute = 0;
-      if (timeStr) {
-        // Handle various time formats
-        if (timeStr.includes(':')) {
-          const parts = timeStr.split(':');
-          hour = parseInt(parts[0]);
-          minute = parseInt(parts[1]) || 0;
-        } else if (timeStr.toLowerCase().includes('am')) {
-          const h = parseInt(timeStr);
-          hour = h === 12 ? 0 : h;
-        } else if (timeStr.toLowerCase().includes('pm')) {
-          const h = parseInt(timeStr);
-          hour = h === 12 ? 12 : h + 12;
+        } else if (dateToUse === 'tomorrow') {
+          dateStr = nowInTimezone.plus({ days: 1 }).toFormat('yyyy-MM-dd');
+        } else if (dateToUse.includes('days')) {
+          const daysMatch = dateToUse.match(/(\d+)/);
+          if (daysMatch) {
+            const days = parseInt(daysMatch[1]);
+            dateStr = nowInTimezone.plus({ days }).toFormat('yyyy-MM-dd');
+          }
         } else {
-          // Assume it's a number (e.g., "9" means 9:00)
-          const h = parseInt(timeStr);
-          if (!isNaN(h) && h >= 1 && h <= 12) {
-            hour = h;
+          try {
+            const parsedDate = DateTime.fromFormat(dateToUse, 'yyyy-MM-dd', { zone: timezone });
+            if (parsedDate.isValid) {
+              dateStr = parsedDate.toFormat('yyyy-MM-dd');
+            }
+          } catch (e) {
+            console.log(`⚠️ Could not parse date: ${dateToUse}, using today`);
+            dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
           }
         }
-      }
 
-      // Create date in user's timezone
-      let dateTime = DateTime.fromObject(
-        {
-          year: parseInt(dateStr.split('-')[0]),
-          month: parseInt(dateStr.split('-')[1]),
-          day: parseInt(dateStr.split('-')[2]),
-          hour: hour,
-          minute: minute,
-          second: 0,
-          millisecond: 0,
-        },
-        { zone: timezone }
-      );
+        // Parse time
+        let hour = 9;
+        let minute = 0;
+        if (timeStr) {
+          try {
+            if (timeStr.includes(':')) {
+              const parts = timeStr.split(':');
+              hour = parseInt(parts[0]);
+              minute = parseInt(parts[1]) || 0;
+            } else if (timeStr.toLowerCase().includes('am')) {
+              const h = parseInt(timeStr);
+              hour = h === 12 ? 0 : h;
+            } else if (timeStr.toLowerCase().includes('pm')) {
+              const h = parseInt(timeStr);
+              hour = h === 12 ? 12 : h + 12;
+            } else {
+              const h = parseInt(timeStr);
+              if (!isNaN(h) && h >= 1 && h <= 12) {
+                hour = h;
+              }
+            }
+          } catch (e) {
+            console.warn('⚠️ Could not parse time, using default');
+          }
+        }
 
-      // If the time is in the past, add 1 day
-      if (dateTime < nowInTimezone) {
-        dateTime = dateTime.plus({ days: 1 });
-        console.log(`⏰ Time ${timeStr} is in the past, adjusted to tomorrow`);
-      }
+        // Create date with validation
+        let dateTime = DateTime.fromObject(
+          {
+            year: parseInt(dateStr.split('-')[0]) || nowInTimezone.year,
+            month: parseInt(dateStr.split('-')[1]) || nowInTimezone.month,
+            day: parseInt(dateStr.split('-')[2]) || nowInTimezone.day,
+            hour: Math.min(23, Math.max(0, hour)),
+            minute: Math.min(59, Math.max(0, minute)),
+            second: 0,
+            millisecond: 0,
+          },
+          { zone: timezone }
+        );
 
-      startTimeParsed = dateTime.toJSDate();
-      console.log(`📅 Parsed startTime (local): ${dateTime.toFormat('yyyy-MM-dd HH:mm')}`);
-      console.log(`📅 Parsed startTime (UTC): ${startTimeParsed.toISOString()}`);
-      
-      if (startTimeParsed) {
-        // Calculate end time (default 30 minutes after start)
-        const endDateTime = dateTime.plus({ minutes: 30 });
-        endTime = endDateTime.toJSDate();
-        console.log(`⏱️ EndTime: ${endDateTime.toFormat('yyyy-MM-dd HH:mm')}`);
+        // If invalid, use current time + 3 hours
+        if (!dateTime.isValid) {
+          console.warn('⚠️ Invalid date, using current time + 3 hours');
+          dateTime = nowInTimezone.plus({ hours: 3 });
+        }
+
+        // If the time is in the past, add 1 day
+        if (dateTime < nowInTimezone) {
+          dateTime = dateTime.plus({ days: 1 });
+          console.log(`⏰ Time is in the past, adjusted to tomorrow`);
+        }
+
+        startTimeParsed = dateTime.toJSDate();
+        console.log(`📅 Parsed startTime (local): ${dateTime.toFormat('yyyy-MM-dd HH:mm')}`);
+        
+        if (startTimeParsed) {
+          // Calculate end time (default 30 minutes after start)
+          const endDateTime = dateTime.plus({ minutes: 30 });
+          endTime = endDateTime.toJSDate();
+          console.log(`⏱️ EndTime: ${endDateTime.toFormat('yyyy-MM-dd HH:mm')}`);
+        }
       }
-    } else {
-      console.warn('⚠️ No date or time extracted by AI');
+    } catch (parseError) {
+      console.error('❌ Date parsing error:', parseError);
+      // Fallback: use current time + 3 hours
+      const fallbackTime = nowInTimezone.plus({ hours: 3 });
+      startTimeParsed = fallbackTime.toJSDate();
+      endTime = fallbackTime.plus({ minutes: 30 }).toJSDate();
+      console.log(`🔄 Using fallback time: ${fallbackTime.toFormat('yyyy-MM-dd HH:mm')}`);
     }
 
     // Step 4: Extract Email & Detect Client
@@ -195,7 +206,7 @@ export const processVoice = async (req, res) => {
     console.log(`👤 Client: ${clientName || 'none'}, Booking: ${isClientBooking}`);
 
     // Step 5: Use AI-generated title
-    const title = classified.title;
+    const title = classified.title || 'Untitled';
     console.log(`📝 Final title: "${title}"`);
 
     // Step 6: Build Item Data
@@ -338,9 +349,9 @@ export const processVoice = async (req, res) => {
     console.error('❌ Voice processing error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to process voice input',
-      errorCode: 'INTERNAL_ERROR',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      message: 'Failed to process voice input. Please try again.',
+      errorCode: 'VOICE_PROCESSING_ERROR',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'An unexpected error occurred',
     });
   }
 };

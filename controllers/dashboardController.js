@@ -1,6 +1,5 @@
 import Item from '../models/Item.js';
 import { generateBriefingTextService } from '../services/aiService.js';
-import { fetchGoogleCalendarEvents } from '../services/calendarService.js';
 import { DateTime } from 'luxon';
 
 function getDayBoundaries(timezone) {
@@ -80,265 +79,6 @@ async function generateSummaryInBackground(userId, timezone, todayItems, total) 
       timestamp: Date.now(),
     });
   }
-}
-
-/**
- * ✅ Find free time windows in user's calendar for today.
- * - Checks BOTH Google Calendar events AND existing items
- * - Uses Luxon with the actual user timezone
- * - Returns ONLY FUTURE windows (from current time onwards)
- * - Each window is capped at a MAX of 60 minutes
- * - Windows shorter than 15 minutes are dropped
- */
-async function findFreeTimeWindows(userId, timezone, date) {
-  try {
-    // ✅ Use Luxon with the actual user timezone
-    const dt = DateTime.fromJSDate(date).setZone(timezone);
-    const startOfDay = dt.startOf('day').toJSDate();
-    const endOfDay = dt.endOf('day').toJSDate();
-    const now = new Date();
-    
-    console.log(`🔍 Finding free windows for ${timezone} from ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
-    console.log(`🕐 Current time: ${now.toLocaleTimeString()}`);
-    
-    // ✅ Fetch Google Calendar events
-    const events = await fetchGoogleCalendarEvents(userId, startOfDay, endOfDay);
-    console.log(`📅 Found ${events.length} calendar events`);
-    
-    // ✅ Fetch existing items (tasks, events, reminders) for today
-    const notExpiredClause = {
-      $or: [
-        { deleteAfter: null },
-        { deleteAfter: { $exists: false } },
-        { deleteAfter: { $gt: now } },
-      ],
-    };
-    
-    const items = await Item.find({
-      userId,
-      status: 'active',
-      startTime: { $gte: startOfDay, $lt: endOfDay },
-      ...notExpiredClause,
-    })
-      .select('startTime endTime type title')
-      .lean();
-    
-    console.log(`📋 Found ${items.length} existing items for today`);
-    
-    // Log item details for debugging
-    items.forEach((item, index) => {
-      const start = item.startTime ? new Date(item.startTime).toLocaleTimeString() : 'no start';
-      const end = item.endTime ? new Date(item.endTime).toLocaleTimeString() : 'not set';
-      console.log(`  Item ${index + 1}: ${item.title} - ${start} to ${end}`);
-    });
-    
-    // ✅ Combine all busy times (events + items) - ONLY FUTURE ONES
-    const busyTimes = [];
-    
-    // Add Google Calendar events (only if in future)
-    events.forEach(e => {
-      if (e.startTime && e.endTime) {
-        const start = new Date(e.startTime);
-        const end = new Date(e.endTime);
-        // Only add if end is after current time
-        if (end > start && end > now) {
-          busyTimes.push({ start, end, source: 'calendar' });
-        }
-      } else if (e.startTime) {
-        const start = new Date(e.startTime);
-        const end = new Date(start.getTime() + 60 * 60 * 1000);
-        if (end > now) {
-          busyTimes.push({ start, end, source: 'calendar' });
-        }
-      }
-    });
-    
-    // Add items with validation (only if in future)
-    items.forEach(item => {
-      if (item.startTime) {
-        const start = new Date(item.startTime);
-        let end;
-        if (item.endTime) {
-          end = new Date(item.endTime);
-          // ✅ Validate that end is after start
-          if (end <= start) {
-            const duration = item.type === 'Event' ? 60 : 30;
-            end = new Date(start.getTime() + duration * 60 * 1000);
-          }
-        } else {
-          const duration = item.type === 'Event' ? 60 : 30;
-          end = new Date(start.getTime() + duration * 60 * 1000);
-        }
-        // Only add if end is in the future
-        if (end > now) {
-          busyTimes.push({ start, end, source: `item (${item.type})` });
-          console.log(`  Busy: ${item.title} - ${start.toLocaleTimeString()} to ${end.toLocaleTimeString()}`);
-        }
-      }
-    });
-    
-    console.log(`📊 Total busy times (future only): ${busyTimes.length}`);
-    
-    // If no busy times, whole day from now is free
-    if (busyTimes.length === 0) {
-      console.log('📊 No busy times - whole day from now is free');
-      const result = [{
-        start: now.toISOString(),
-        end: endOfDay.toISOString(),
-        duration: Math.min(60, (endOfDay - now) / (1000 * 60)),
-        startTime: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        endTime: endOfDay.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        isPast: false,
-        rawDuration: Math.floor((endOfDay - now) / (1000 * 60)),
-      }];
-      return splitIntoHourlyWindows(result);
-    }
-    
-    // ✅ Sort busy times by start time
-    busyTimes.sort((a, b) => a.start - b.start);
-    
-    // ✅ Merge overlapping busy times
-    const mergedBusyTimes = [];
-    for (const busy of busyTimes) {
-      if (mergedBusyTimes.length === 0) {
-        mergedBusyTimes.push(busy);
-      } else {
-        const last = mergedBusyTimes[mergedBusyTimes.length - 1];
-        if (busy.start <= last.end) {
-          last.end = new Date(Math.max(last.end, busy.end));
-        } else {
-          mergedBusyTimes.push(busy);
-        }
-      }
-    }
-    
-    console.log(`📊 After merging: ${mergedBusyTimes.length} busy periods`);
-    mergedBusyTimes.forEach((busy, i) => {
-      console.log(`  Busy ${i+1}: ${busy.start.toLocaleTimeString()} - ${busy.end.toLocaleTimeString()}`);
-    });
-    
-    // ✅ Find free windows - START FROM CURRENT TIME, NOT START OF DAY
-    const rawWindows = [];
-    let currentTime = now; // ✅ Start from current time
-    
-    // Check gaps between busy periods
-    for (const busy of mergedBusyTimes) {
-      // Gap before this busy period (only if after current time)
-      if (busy.start > currentTime) {
-        const duration = (busy.start - currentTime) / (1000 * 60);
-        if (duration >= 15) {
-          rawWindows.push({ start: new Date(currentTime), end: new Date(busy.start) });
-        }
-      }
-      // Move current time to the end of this busy period
-      if (busy.end > currentTime) {
-        currentTime = new Date(busy.end);
-      }
-    }
-    
-    // Gap after the last busy period
-    if (endOfDay > currentTime) {
-      const duration = (endOfDay - currentTime) / (1000 * 60);
-      if (duration >= 15) {
-        rawWindows.push({ start: new Date(currentTime), end: new Date(endOfDay) });
-      }
-    }
-    
-    console.log(`📊 Found ${rawWindows.length} raw windows (after current time)`);
-    rawWindows.forEach((w, i) => {
-      const duration = (w.end - w.start) / (1000 * 60);
-      console.log(`  Raw window ${i+1}: ${w.start.toLocaleTimeString()} - ${w.end.toLocaleTimeString()} (${Math.floor(duration)} min)`);
-    });
-    
-    // Format windows and split into hourly chunks
-    const formattedWindows = rawWindows.map(w => ({
-      start: w.start.toISOString(),
-      end: w.end.toISOString(),
-      duration: Math.floor((w.end - w.start) / (1000 * 60)),
-      startTime: w.start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      endTime: w.end.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      isPast: false, // All windows are from current time onwards
-      rawDuration: Math.floor((w.end - w.start) / (1000 * 60)),
-    }));
-    
-    // Split into hourly windows
-    return splitIntoHourlyWindows(formattedWindows);
-    
-  } catch (error) {
-    console.error('❌ Error finding free time:', error);
-    return [];
-  }
-}
-
-/**
- * ✅ Helper to split windows into 60-minute chunks
- */
-function splitIntoHourlyWindows(windows) {
-  const MAX_WINDOW_MINUTES = 60;
-  const MIN_WINDOW_MINUTES = 15;
-  const now = new Date();
-  const result = [];
-  
-  for (const w of windows) {
-    const start = new Date(w.start);
-    const end = new Date(w.end);
-    let currentStart = start;
-    
-    while (currentStart < end) {
-      const remaining = (end - currentStart) / (1000 * 60);
-      const duration = Math.min(remaining, MAX_WINDOW_MINUTES);
-      const chunkEnd = new Date(currentStart.getTime() + duration * 60 * 1000);
-      
-      // Check if this chunk is in the past or partially in the past
-      const isPast = chunkEnd <= now;
-      const isPartiallyPast = currentStart < now && chunkEnd > now;
-      
-      let effectiveStart = currentStart;
-      let effectiveEnd = chunkEnd;
-      let effectiveDuration = duration;
-      let isPastFlag = isPast;
-      
-      if (isPartiallyPast) {
-        effectiveStart = now;
-        const remainingDuration = (chunkEnd - now) / (1000 * 60);
-        if (remainingDuration < MIN_WINDOW_MINUTES) {
-          currentStart = chunkEnd;
-          continue;
-        }
-        effectiveDuration = remainingDuration;
-        effectiveEnd = new Date(effectiveStart.getTime() + effectiveDuration * 60 * 1000);
-        isPastFlag = false;
-      }
-      
-      // ✅ Skip if duration is less than MIN or if window is in the past
-      if (effectiveDuration >= MIN_WINDOW_MINUTES && !isPastFlag) {
-        result.push({
-          start: effectiveStart.toISOString(),
-          end: effectiveEnd.toISOString(),
-          duration: Math.floor(effectiveDuration),
-          startTime: effectiveStart.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          endTime: effectiveEnd.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          isPast: false,
-          rawDuration: Math.floor(effectiveDuration),
-        });
-      }
-      
-      currentStart = chunkEnd;
-    }
-  }
-  
-  // Remove duplicates by start time
-  const uniqueResults = [];
-  const seenStarts = new Set();
-  for (const w of result) {
-    const key = w.start;
-    if (!seenStarts.has(key)) {
-      seenStarts.add(key);
-      uniqueResults.push(w);
-    }
-  }
-  
-  return uniqueResults;
 }
 
 export const getDashboard = async (req, res) => {
@@ -446,10 +186,6 @@ export const getDashboard = async (req, res) => {
 
     const totalOverdue = overdueItems.length;
 
-    // ✅ Find ALL free time windows for today (checking both calendar AND items)
-    const todayDate = new Date();
-    const freeWindows = await findFreeTimeWindows(userId, timezone, todayDate);
-
     const stats = { total, tasks, events, notes, reminders, completed, expired: 0 };
 
     if (!cachedSummary || Date.now() - cachedSummary.timestamp >= SUMMARY_TTL_MS) {
@@ -472,7 +208,6 @@ export const getDashboard = async (req, res) => {
       overdueItems: overdueItems || [],
       overdueCount: totalOverdue || 0,
       overdueByType: overdueByType,
-      freeWindows: freeWindows || [],
     };
 
     dashboardCache.set(cacheKey, { 
@@ -480,7 +215,7 @@ export const getDashboard = async (req, res) => {
       timestamp: Date.now() 
     });
 
-    console.log(`📊 Dashboard: ${todayItems.length} today, ${total} total, ${totalOverdue} overdue, ${freeWindows.length} free windows`);
+    console.log(`📊 Dashboard: ${todayItems.length} today, ${total} total, ${totalOverdue} overdue`);
     
     res.status(200).json(responseData);
   } catch (error) {

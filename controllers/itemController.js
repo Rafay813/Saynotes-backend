@@ -1,7 +1,7 @@
 import Item from '../models/Item.js';
 import { syncWithGoogleCalendar } from '../services/calendarService.js';
 import { sendReminderEmail } from '../services/emailService.js';
-import { invalidateDashboardCache } from './dashboardController.js'; // ✅ use the real shared cache
+import { invalidateDashboardCache } from './dashboardController.js';
 import { DateTime } from 'luxon';
 
 /**
@@ -146,8 +146,14 @@ export const getItems = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const skip = (page - 1) * limit;
 
+    // ✅ Optimized: Use lean() and select only needed fields for performance
     const [items, total] = await Promise.all([
-      Item.find(query).sort(sort).skip(skip).limit(limit).lean(),
+      Item.find(query)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .lean()
+        .select('title type status startTime endTime createdAt isClientBooking clientName subtasks'),
       Item.countDocuments(query),
     ]);
 
@@ -189,6 +195,7 @@ export const getItem = async (req, res) => {
       });
     }
 
+    // ✅ Optimized: Use lean() for better performance
     const item = await Item.findOne({
       _id: req.params.id,
       userId: req.user._id,
@@ -274,6 +281,7 @@ export const createItem = async (req, res) => {
       await savedItem.save();
     }
 
+    // ✅ Invalidate cache immediately for fast dashboard update
     invalidateDashboardCache(req.user._id);
 
     return res.status(201).json({ success: true, item: savedItem });
@@ -367,10 +375,12 @@ export const updateItem = async (req, res) => {
 
     const updatedItem = await item.save();
 
+    // ✅ Invalidate cache immediately
     invalidateDashboardCache(req.user._id);
 
     res.status(200).json({ success: true, item: updatedItem });
 
+    // ✅ Non-blocking Google Calendar sync
     if (updatedItem.type === 'Event' && updatedItem.status === 'active') {
       setImmediate(async () => {
         try {
