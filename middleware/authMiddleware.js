@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
-import { createClerkClient, verifyToken } from '@clerk/backend';
+import { createClerkClient } from '@clerk/clerk-sdk-node';
+import { verifyToken } from '@clerk/backend'; // ✅ Correct import
 
 // ✅ Load environment variables
 import dotenv from 'dotenv';
@@ -10,7 +11,7 @@ dotenv.config();
 console.log('🔑 CLERK_SECRET_KEY exists:', !!process.env.CLERK_SECRET_KEY);
 console.log('🔑 JWT_SECRET exists:', !!process.env.JWT_SECRET);
 
-// ✅ Initialize Clerk client (only if secret key exists)
+// ✅ Initialize Clerk client
 let clerkClient = null;
 try {
   if (process.env.CLERK_SECRET_KEY) {
@@ -27,8 +28,65 @@ try {
 }
 
 /**
+ * ✅ Detect token type based on algorithm
+ */
+const detectTokenType = (token) => {
+  try {
+    const decoded = jwt.decode(token, { complete: true });
+    if (!decoded) return 'invalid';
+
+    const alg = decoded.header.alg;
+    if (alg === 'RS256') return 'clerk';
+    if (alg === 'HS256') return 'local';
+    return 'unknown';
+  } catch (error) {
+    return 'invalid';
+  }
+};
+
+/**
+ * ✅ Verify Clerk token using @clerk/backend's verifyToken
+ * This handles JWKS fetching, caching, and signature verification automatically
+ */
+const verifyClerkToken = async (token) => {
+  try {
+    if (!process.env.CLERK_SECRET_KEY) {
+      throw new Error('CLERK_SECRET_KEY is not set');
+    }
+
+    // ✅ Use Clerk's official verifyToken helper
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY,
+      // authorizedParties: ['https://your-frontend.com'], // Optional: add your frontend URL
+    });
+
+    return payload;
+  } catch (error) {
+    console.error('❌ Clerk token verification failed:', error.message);
+    throw error;
+  }
+};
+
+/**
+ * ✅ Verify local JWT token (HS256)
+ */
+const verifyLocalToken = (token) => {
+  try {
+    if (!process.env.JWT_SECRET) {
+      throw new Error('JWT_SECRET is not set on the server');
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    return decoded;
+  } catch (error) {
+    console.error('❌ Local JWT verification failed:', error.message);
+    throw error;
+  }
+};
+
+/**
  * Protect routes - Verify JWT token
- * Supports both Clerk JWT and custom JWT
+ * Supports both Clerk JWT (RS256) and custom JWT (HS256)
  */
 export const protect = async (req, res, next) => {
   let token;
@@ -46,86 +104,65 @@ export const protect = async (req, res, next) => {
   console.log('🔑 Token received:', token.substring(0, 30) + '...');
 
   try {
-    // ✅ DETECT TOKEN TYPE
-    // Clerk tokens are longer (~200+ chars) with RS256
-    // Manual JWT tokens are shorter (~100-150 chars) with HS256
-    const isClerkToken = token.length > 180;
+    // ✅ Detect token type by algorithm
+    const tokenType = detectTokenType(token);
+    console.log(`📌 Token type: ${tokenType}`);
 
-    if (isClerkToken && clerkClient && process.env.CLERK_SECRET_KEY) {
-      // ✅ TRY CLERK VERIFICATION
+    let payload;
+    let userId;
+
+    if (tokenType === 'clerk') {
+      // ✅ CLERK TOKEN (RS256) - Use Clerk's verifyToken
       try {
-        console.log('🔄 Attempting Clerk verification...');
-
-        const payload = await verifyToken(token, {
-          secretKey: process.env.CLERK_SECRET_KEY,
-        });
-
-        const clerkUserId = payload.sub;
-        console.log('✅ Clerk JWT verified for user:', clerkUserId);
-
-        // ✅ Get user from Clerk
-        const clerkUser = await clerkClient.users.getUser(clerkUserId);
-        const clerkEmail = clerkUser.emailAddresses[0]?.emailAddress;
-
-        if (!clerkEmail) {
-          throw new Error('Clerk user has no email address');
-        }
-
-        // ✅ Find or create user in MongoDB
-        let user = await User.findOne({
-          $or: [{ clerkId: clerkUserId }, { email: clerkEmail }],
-        });
-
-        if (!user) {
-          console.log('📝 Creating new user from Clerk...');
-          user = await User.create({
-            name:
-              `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim() ||
-              clerkEmail.split('@')[0],
-            email: clerkEmail,
-            password: 'clerk_oauth_user',
-            clerkId: clerkUserId,
-            isEmailVerified: true,
-          });
-          console.log('✅ Created new user from Clerk:', user.email);
-        } else if (!user.clerkId) {
-          user.clerkId = clerkUserId;
-          await user.save();
-          console.log('✅ Updated existing user with clerkId:', user.email);
-        }
-
-        // ✅ Attach user to request
-        req.user = {
-          _id: user._id,
-          id: user._id,
-          email: user.email,
-          name: user.name,
-        };
-        console.log('✅ User authenticated via Clerk:', user.email);
-        return next();
-      } catch (clerkError) {
-        console.error('❌ Clerk verification failed:', clerkError.message);
-        // Fall through to try manual JWT verification
-      }
-    }
-
-    // ✅ MANUAL JWT VERIFICATION (for email auth or fallback)
-    try {
-      console.log('🔄 Attempting manual JWT verification...');
-      
-      if (!process.env.JWT_SECRET) {
-        throw new Error('JWT_SECRET is not set on the server');
+        console.log('🔄 Verifying Clerk token...');
+        payload = await verifyClerkToken(token);
+        userId = payload.sub;
+        console.log('✅ Clerk token verified for user:', userId);
+      } catch (error) {
+        console.error('❌ Clerk token verification failed:', error.message);
+        return res.status(401).json({ message: 'Invalid Clerk token' });
       }
 
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      console.log('✅ Token decoded for user:', decoded.id);
+      // ✅ Get user details from Clerk
+      let clerkEmail = null;
+      let clerkName = null;
 
-      // ✅ Find user in database
-      const user = await User.findById(decoded.id).select('-password');
-      
+      if (clerkClient) {
+        try {
+          const clerkUser = await clerkClient.users.getUser(userId);
+          clerkEmail = clerkUser.emailAddresses[0]?.emailAddress;
+          clerkName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
+        } catch (userError) {
+          console.log('⚠️ Could not fetch Clerk user details, using token data');
+          clerkEmail = payload.email || payload.emailAddress || userId;
+          clerkName = payload.name || payload.username || 'User';
+        }
+      }
+
+      if (!clerkEmail) {
+        clerkEmail = payload.email || payload.emailAddress || userId;
+        clerkName = payload.name || payload.username || 'User';
+      }
+
+      // ✅ Find or create user in MongoDB
+      let user = await User.findOne({
+        $or: [{ clerkId: userId }, { email: clerkEmail }],
+      });
+
       if (!user) {
-        console.log('❌ User not found in database for ID:', decoded.id);
-        return res.status(401).json({ message: 'User not found' });
+        console.log('📝 Creating new user from Clerk...');
+        user = await User.create({
+          name: clerkName || clerkEmail.split('@')[0],
+          email: clerkEmail,
+          password: 'clerk_oauth_user',
+          clerkId: userId,
+          isEmailVerified: true,
+        });
+        console.log('✅ Created new user from Clerk:', user.email);
+      } else if (!user.clerkId) {
+        user.clerkId = userId;
+        await user.save();
+        console.log('✅ Updated existing user with clerkId:', user.email);
       }
 
       // ✅ Attach user to request
@@ -135,12 +172,45 @@ export const protect = async (req, res, next) => {
         email: user.email,
         name: user.name,
       };
-      console.log('✅ User authenticated via manual JWT:', user.email);
+      console.log('✅ User authenticated via Clerk:', user.email);
       return next();
-    } catch (jwtError) {
-      console.error('❌ Manual JWT verification failed:', jwtError.message);
-      return res.status(401).json({ message: 'Not authorized, token failed' });
+
+    } else if (tokenType === 'local') {
+      // ✅ LOCAL JWT TOKEN (HS256) - For email/password auth
+      try {
+        console.log('🔄 Verifying local JWT token...');
+        payload = await verifyLocalToken(token);
+        userId = payload.id;
+        console.log('✅ Local JWT verified for user:', userId);
+
+        // ✅ Find user in database
+        const user = await User.findById(userId).select('-password');
+
+        if (!user) {
+          console.log('❌ User not found in database for ID:', userId);
+          return res.status(401).json({ message: 'User not found' });
+        }
+
+        // ✅ Attach user to request
+        req.user = {
+          _id: user._id,
+          id: user._id,
+          email: user.email,
+          name: user.name,
+        };
+        console.log('✅ User authenticated via local JWT:', user.email);
+        return next();
+      } catch (error) {
+        console.error('❌ Local JWT verification failed:', error.message);
+        return res.status(401).json({ message: 'Invalid token' });
+      }
+
+    } else {
+      // ✅ UNKNOWN TOKEN TYPE
+      console.error('❌ Unknown token type:', tokenType);
+      return res.status(401).json({ message: 'Unsupported token type' });
     }
+
   } catch (error) {
     console.error('❌ Auth error:', error.message);
     return res.status(401).json({ message: 'Not authorized, token failed' });

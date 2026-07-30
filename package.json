@@ -13,7 +13,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@clerk/backend": "^3.10.0",
+    "@clerk/backend": "^3.14.0",
     "@clerk/clerk-sdk-node": "^4.13.23",
     "@google/generative-ai": "^0.24.1",
     "bcryptjs": "^3.0.3",

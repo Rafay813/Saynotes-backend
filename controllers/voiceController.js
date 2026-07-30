@@ -2,10 +2,23 @@ import mongoose from 'mongoose';
 import { transcribeAudioWithGroq, isGroqAvailable } from '../services/groqTranscriptionService.js';
 import { aiParsingService } from '../services/aiService.js';
 import { syncWithGoogleCalendar } from '../services/calendarService.js';
-import { parseDateTime, calculateEndTime, extractEmail, detectClientBooking } from '../utils/dateUtils.js';
+import { 
+  parseDateTime, 
+  calculateEndTime, 
+  extractEmail, 
+  detectClientBooking
+  // ✅ parseTimeString removed - not needed directly
+} from '../utils/dateUtils.js';
 import Item from '../models/Item.js';
 import { invalidateDashboardCache } from './dashboardController.js';
 import { DateTime } from 'luxon';
+
+// ✅ Development logging helper
+const devLog = (...args) => {
+  if (process.env.NODE_ENV === 'development') {
+    console.log(...args);
+  }
+};
 
 /**
  * Process voice input with Optimized Performance
@@ -41,7 +54,7 @@ export const processVoice = async (req, res) => {
       });
     }
 
-    console.log('🎤 Processing voice input (optimized)...');
+    devLog('🎤 Processing voice input (optimized)...');
 
     // Step 1: Transcribe
     const transcription = await transcribeAudioWithGroq(req.file.buffer, req.file.mimetype);
@@ -54,160 +67,86 @@ export const processVoice = async (req, res) => {
     }
 
     const transcript = transcription.transcript;
-    console.log(`📝 Transcript: "${transcript}" (${Date.now() - startTime}ms)`);
+    devLog(`📝 Transcript: "${transcript}" (${Date.now() - startTime}ms)`);
 
     // Step 2: AI Classification
     const timezone = req.body.timezone || 'Asia/Karachi';
-    console.log(`🌍 Timezone: ${timezone}`);
+    devLog(`🌍 Timezone: ${timezone}`);
 
     const classified = await aiParsingService(transcript);
-    console.log(`🤖 Classified: ${Date.now() - startTime}ms`);
+    devLog(`🤖 Classified: ${Date.now() - startTime}ms`);
+    devLog('🤖 AI Response:', JSON.stringify(classified, null, 2));
 
-    // ✅ Step 3: Parse Date/Time with default = current time + 3 hours
+    // ✅ Step 3: Parse Date/Time using dateUtils.js - ALL parsing is here!
     let startTimeParsed = null;
     let endTime = null;
 
-    console.log(`📅 Date from AI: "${classified.date}"`);
-    console.log(`⏰ Time from AI: "${classified.time}"`);
-
-    let dateToUse = classified.date;
+    devLog(`📅 Date from AI: "${classified.date}"`);
+    devLog(`⏰ Time from AI: "${classified.time}"`);
 
     // Get current time in user's timezone
     const nowInTimezone = DateTime.now().setZone(timezone);
-    console.log(`🕐 Current time in ${timezone}: ${nowInTimezone.toFormat('HH:mm')}`);
+    devLog(`🕐 Current time in ${timezone}: ${nowInTimezone.toFormat('yyyy-MM-dd HH:mm')}`);
 
-    // ✅ If AI detected a specific date (like "in 24 days"), use it!
-    if (dateToUse && dateToUse !== 'today' && dateToUse !== 'tomorrow') {
-      console.log(`📅 Using detected date: "${dateToUse}"`);
-    } else if (!dateToUse && classified.time) {
-      dateToUse = 'today';
-      console.log('📅 No date provided, defaulting to "today"');
-    }
+    // ✅ Use parseDateTime for ALL date/time parsing
+    // No manual parsing in the controller!
+    const dateToUse = classified.date || 'today';
+    const timeToUse = classified.time || null;
 
-    // ✅ If we have a date but no time, use current time + 3 hours (FUTURE)
-    if (dateToUse && !classified.time) {
-      const futureTime = nowInTimezone.plus({ hours: 3 });
-      classified.time = futureTime.toFormat('HH:mm');
-      console.log(`⏰ No time provided, defaulting to future time: ${classified.time} (current time + 3 hours)`);
-    }
+    devLog(`📅 Using date: "${dateToUse}", time: "${timeToUse}"`);
 
-    // ✅ If no date and no time, default to today at current time + 3 hours
-    if (!dateToUse && !classified.time) {
-      dateToUse = 'today';
-      const futureTime = nowInTimezone.plus({ hours: 3 });
-      classified.time = futureTime.toFormat('HH:mm');
-      console.log(`📅⏰ No date/time provided, defaulting to "today" at ${classified.time} (current time + 3 hours)`);
-    }
-
-    // ✅ Parse date and time
     try {
-      if (dateToUse) {
-        let dateStr = dateToUse;
-        let timeStr = classified.time || '09:00';
-        
-        // Handle relative dates
-        if (dateToUse === 'today') {
-          dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
-        } else if (dateToUse === 'tomorrow') {
-          dateStr = nowInTimezone.plus({ days: 1 }).toFormat('yyyy-MM-dd');
-        } else if (dateToUse.includes('days')) {
-          const daysMatch = dateToUse.match(/(\d+)/);
-          if (daysMatch) {
-            const days = parseInt(daysMatch[1]);
-            dateStr = nowInTimezone.plus({ days }).toFormat('yyyy-MM-dd');
-          }
-        } else {
-          try {
-            const parsedDate = DateTime.fromFormat(dateToUse, 'yyyy-MM-dd', { zone: timezone });
-            if (parsedDate.isValid) {
-              dateStr = parsedDate.toFormat('yyyy-MM-dd');
-            }
-          } catch (e) {
-            console.log(`⚠️ Could not parse date: ${dateToUse}, using today`);
-            dateStr = nowInTimezone.toFormat('yyyy-MM-dd');
-          }
-        }
-
-        // Parse time
-        let hour = 9;
-        let minute = 0;
-        if (timeStr) {
-          try {
-            if (timeStr.includes(':')) {
-              const parts = timeStr.split(':');
-              hour = parseInt(parts[0]);
-              minute = parseInt(parts[1]) || 0;
-            } else if (timeStr.toLowerCase().includes('am')) {
-              const h = parseInt(timeStr);
-              hour = h === 12 ? 0 : h;
-            } else if (timeStr.toLowerCase().includes('pm')) {
-              const h = parseInt(timeStr);
-              hour = h === 12 ? 12 : h + 12;
-            } else {
-              const h = parseInt(timeStr);
-              if (!isNaN(h) && h >= 1 && h <= 12) {
-                hour = h;
-              }
-            }
-          } catch (e) {
-            console.warn('⚠️ Could not parse time, using default');
-          }
-        }
-
-        // Create date with validation
-        let dateTime = DateTime.fromObject(
-          {
-            year: parseInt(dateStr.split('-')[0]) || nowInTimezone.year,
-            month: parseInt(dateStr.split('-')[1]) || nowInTimezone.month,
-            day: parseInt(dateStr.split('-')[2]) || nowInTimezone.day,
-            hour: Math.min(23, Math.max(0, hour)),
-            minute: Math.min(59, Math.max(0, minute)),
-            second: 0,
-            millisecond: 0,
-          },
-          { zone: timezone }
-        );
-
-        // If invalid, use current time + 3 hours
-        if (!dateTime.isValid) {
-          console.warn('⚠️ Invalid date, using current time + 3 hours');
-          dateTime = nowInTimezone.plus({ hours: 3 });
-        }
-
-        // If the time is in the past, add 1 day
-        if (dateTime < nowInTimezone) {
-          dateTime = dateTime.plus({ days: 1 });
-          console.log(`⏰ Time is in the past, adjusted to tomorrow`);
-        }
-
-        startTimeParsed = dateTime.toJSDate();
-        console.log(`📅 Parsed startTime (local): ${dateTime.toFormat('yyyy-MM-dd HH:mm')}`);
-        
-        if (startTimeParsed) {
-          // Calculate end time (default 30 minutes after start)
-          const endDateTime = dateTime.plus({ minutes: 30 });
-          endTime = endDateTime.toJSDate();
-          console.log(`⏱️ EndTime: ${endDateTime.toFormat('yyyy-MM-dd HH:mm')}`);
-        }
+      // ✅ Let parseDateTime handle everything:
+      // - "today", "tomorrow", "Friday", "next Monday"
+      // - "in 5 days", "in 2 weeks"
+      // - "11:45 PM", "10:30 am", "noon", "evening"
+      // - Timezone conversion
+      // - Past date handling
+      startTimeParsed = parseDateTime(dateToUse, timeToUse, timezone);
+      
+      if (!startTimeParsed) {
+        throw new Error('parseDateTime returned null');
       }
+      
+      devLog(`✅ Parsed startTime (UTC): ${startTimeParsed.toISOString()}`);
+      const startLocal = DateTime.fromJSDate(startTimeParsed).setZone(timezone);
+      devLog(`✅ Parsed startTime (local): ${startLocal.toFormat('yyyy-MM-dd HH:mm')}`);
+      
     } catch (parseError) {
       console.error('❌ Date parsing error:', parseError);
-      // Fallback: use current time + 3 hours
+      devLog('🔄 Using fallback: current time + 3 hours');
+      
+      // Fallback: current time + 3 hours
       const fallbackTime = nowInTimezone.plus({ hours: 3 });
       startTimeParsed = fallbackTime.toJSDate();
-      endTime = fallbackTime.plus({ minutes: 30 }).toJSDate();
-      console.log(`🔄 Using fallback time: ${fallbackTime.toFormat('yyyy-MM-dd HH:mm')}`);
+      devLog(`🔄 Fallback time: ${fallbackTime.toFormat('yyyy-MM-dd HH:mm')}`);
+    }
+
+    // ✅ Calculate end time using dateUtils.js
+    if (startTimeParsed) {
+      endTime = calculateEndTime(
+        startTimeParsed,
+        classified.endTime,
+        classified.duration || '30 minutes',
+        timezone
+      );
+      devLog(`⏱️ End time (UTC): ${endTime?.toISOString()}`);
+      
+      if (endTime) {
+        const endLocal = DateTime.fromJSDate(endTime).setZone(timezone);
+        devLog(`⏱️ End time (local): ${endLocal.toFormat('yyyy-MM-dd HH:mm')}`);
+      }
     }
 
     // Step 4: Extract Email & Detect Client
     const clientEmail = extractEmail(transcript);
     const isClientBooking = detectClientBooking(transcript, classified.person);
     const clientName = isClientBooking ? classified.person : null;
-    console.log(`👤 Client: ${clientName || 'none'}, Booking: ${isClientBooking}`);
+    devLog(`👤 Client: ${clientName || 'none'}, Booking: ${isClientBooking}`);
 
     // Step 5: Use AI-generated title
     const title = classified.title || 'Untitled';
-    console.log(`📝 Final title: "${title}"`);
+    devLog(`📝 Final title: "${title}"`);
 
     // Step 6: Build Item Data
     const itemData = {
@@ -227,7 +166,10 @@ export const processVoice = async (req, res) => {
       location: classified.location || null,
     };
 
-    console.log(`📦 Final item data:`, JSON.stringify(itemData, null, 2));
+    devLog(`📦 Final item data:`, JSON.stringify(itemData, (key, value) => {
+      if (value instanceof Date) return value.toISOString();
+      return value;
+    }, 2));
 
     // Step 7: Add subtasks for Tasks
     if (classified.type === 'Task') {
@@ -241,18 +183,18 @@ export const processVoice = async (req, res) => {
     if (isClientBooking && (classified.type === 'Event' || classified.type === 'Reminder')) {
       const newId = new mongoose.Types.ObjectId();
       itemData.videoCallLink = `https://meet.jit.si/SayNote-${newId}`;
-      console.log('✅ Video link generated before save');
+      devLog('✅ Video link generated before save');
     }
 
     // Step 9: Create and Save Item
     const savedItem = await Item.create(itemData);
     invalidateDashboardCache(req.user._id);
-    console.log(`✅ Item created: ${savedItem._id} (${Date.now() - startTime}ms)`);
+    devLog(`✅ Item created: ${savedItem._id} (${Date.now() - startTime}ms)`);
 
     // Step 10: REMINDER → EVENT AUTO-CREATION
     let linkedEvent = null;
     if (savedItem.type === 'Reminder' && savedItem.startTime) {
-      console.log(`🔗 Creating linked Event from Reminder: "${savedItem.title}"`);
+      devLog(`🔗 Creating linked Event from Reminder: "${savedItem.title}"`);
       
       let eventEndTime = savedItem.endTime || new Date(savedItem.startTime.getTime() + 30 * 60 * 1000);
       
@@ -284,16 +226,16 @@ export const processVoice = async (req, res) => {
       linkedEvent = await Item.create(eventData);
       invalidateDashboardCache(req.user._id);
       
-      console.log(`✅ Linked Event created: ${linkedEvent._id}`);
+      devLog(`✅ Linked Event created: ${linkedEvent._id}`);
       
       await Item.findByIdAndUpdate(savedItem._id, {
         $set: { linkedEventId: linkedEvent._id }
       });
       
-      console.log(`🔗 Reminder ${savedItem._id} linked to Event ${linkedEvent._id}`);
+      devLog(`🔗 Reminder ${savedItem._id} linked to Event ${linkedEvent._id}`);
     }
 
-    console.log(`✅ Voice processed in ${Date.now() - startTime}ms`);
+    devLog(`✅ Voice processed in ${Date.now() - startTime}ms`);
 
     // Step 11: Send response immediately
     const responseData = {
@@ -319,7 +261,7 @@ export const processVoice = async (req, res) => {
             savedItem.googleEventId = syncResult.googleEventId;
             savedItem.isSynced = true;
             await savedItem.save();
-            console.log('✅ Google Calendar synced (background)');
+            devLog('✅ Google Calendar synced (background)');
           }
         } catch (gcalError) {
           console.warn('⚠️ Calendar sync error (non-fatal):', gcalError.message);
@@ -335,7 +277,7 @@ export const processVoice = async (req, res) => {
             linkedEvent.googleEventId = syncResult.googleEventId;
             linkedEvent.isSynced = true;
             await linkedEvent.save();
-            console.log('✅ Linked event synced (background)');
+            devLog('✅ Linked event synced (background)');
           }
         } catch (gcalError) {
           console.warn('⚠️ Linked event sync error (non-fatal):', gcalError.message);
