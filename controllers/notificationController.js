@@ -1,35 +1,49 @@
-import { sendPushNotification } from '../services/notificationService.js';
+import Reminder from '../models/Reminder.js';
 
-// @desc    Schedule a delayed notification
-// @route   POST /api/v1/notifications/schedule
+// @desc    Handle "Hear Now" action
+// @route   POST /api/v1/reminders/:id/hear-now
 // @access  Private
-export const scheduleNotification = async (req, res) => {
+export const hearNow = async (req, res) => {
   try {
-    const { title, message, delayMs, itemId, expoPushToken } = req.body;
+    const reminder = await Reminder.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
 
-    if (!title || !message || delayMs === undefined) {
-      return res.status(400).json({ message: 'Please provide title, message, and delayMs' });
+    if (!reminder) {
+      return res.status(404).json({
+        success: false,
+        message: 'Reminder not found',
+      });
     }
 
-    const delay = parseInt(delayMs, 10);
+    // Mark as read
+    reminder.hasBeenRead = true;
+    reminder.readAt = new Date();
+    await reminder.save();
 
-    console.log(`[Notification Scheduler] Scheduled: "${title}" in ${delay}ms`);
-
-    setTimeout(() => {
-      sendPushNotification({
-        title,
-        message,
-        userId: req.user._id.toString(),
-        itemId,
-        expoPushToken,
-      });
-    }, delay);
+    // Generate TTS audio for playback
+    const { textToSpeech } = await import('../services/ttsService.js');
+    const ttsResult = await textToSpeech(
+      `${reminder.title}. ${reminder.message}`
+    );
 
     res.status(200).json({
-      message: 'Notification scheduled successfully',
-      scheduledFor: new Date(Date.now() + delay),
+      success: true,
+      data: {
+        reminder,
+        audio: ttsResult.audioBase64 || null,
+        useDeviceTTS: ttsResult.useDeviceTTS || false,
+        provider: ttsResult.provider || 'unknown',
+      },
+      message: 'Playing reminder now',
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('❌ Hear Now error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to play reminder',
+      error: error.message,
+    });
   }
 };

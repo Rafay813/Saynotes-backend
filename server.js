@@ -5,16 +5,18 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { startAutoDeleteWorker, runInitialCleanup } from './workers/autoDeleteWorker.js';
-// Add these imports
 import syncRoutes from './routes/syncRoutes.js';
 
-// Add this route
 // Import routes
 import authRoutes from './routes/authRoutes.js';
 import itemRoutes from './routes/itemRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
 import voiceRoutes from './routes/voiceRoutes.js';
 import calendarRoutes from './routes/calendarRoutes.js';
+
+// ✅ Import reminder routes and worker
+import reminderRoutes from './routes/reminderRoutes.js';
+import { startReminderWorker, runInitialReminderCleanup } from './workers/reminderWorker.js';
 
 // Load environment variables
 dotenv.config();
@@ -60,8 +62,10 @@ app.use('/api/v1/items', itemRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/voice', voiceRoutes);
 app.use('/api/v1/sync', syncRoutes);
-
 app.use('/api/v1/calendar', calendarRoutes);
+
+// ✅ Reminder routes - ADD THIS
+app.use('/api/v1/reminders', reminderRoutes);
 
 // ✅ Backward compatibility
 app.use('/api/auth', authRoutes);
@@ -69,6 +73,7 @@ app.use('/api/items', itemRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/calendar', calendarRoutes);
+app.use('/api/reminders', reminderRoutes);
 
 // ✅ Health check
 app.get('/', (req, res) => {
@@ -121,6 +126,15 @@ const createIndexes = async () => {
       { key: { userId: 1, createdAt: -1 } },
       { key: { deleteAfter: 1 } },
     ]);
+    
+    // ✅ Create indexes for reminders
+    await db.collection('reminders').createIndexes([
+      { key: { userId: 1, scheduledFor: 1 } },
+      { key: { userId: 1, status: 1 } },
+      { key: { scheduledFor: 1, status: 1 } },
+      { key: { snoozedUntil: 1 } },
+    ]);
+    
     console.log('✅ Database indexes created');
   } catch (error) {
     console.error('❌ Index creation error:', error);
@@ -132,8 +146,15 @@ const startServer = async () => {
   try {
     await connectDB();
     console.log('✅ Database connected');
+    
+    // ✅ Run initial cleanup
     await runInitialCleanup();
     startAutoDeleteWorker();
+    
+    // ✅ Run initial reminder cleanup and start reminder worker
+    await runInitialReminderCleanup();
+    startReminderWorker();
+    
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
