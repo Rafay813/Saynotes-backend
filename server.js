@@ -18,6 +18,9 @@ import calendarRoutes from './routes/calendarRoutes.js';
 import reminderRoutes from './routes/reminderRoutes.js';
 import { startReminderWorker, runInitialReminderCleanup } from './workers/reminderWorker.js';
 
+// ✅ Import assistant routes
+import assistantRoutes from './routes/assistantRoutes.js';
+
 // Load environment variables
 dotenv.config();
 
@@ -63,9 +66,10 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/voice', voiceRoutes);
 app.use('/api/v1/sync', syncRoutes);
 app.use('/api/v1/calendar', calendarRoutes);
-
-// ✅ Reminder routes - ADD THIS
 app.use('/api/v1/reminders', reminderRoutes);
+
+// ✅ Assistant routes - GROQ powered AI assistant
+app.use('/api/v1/assistant', assistantRoutes);
 
 // ✅ Backward compatibility
 app.use('/api/auth', authRoutes);
@@ -74,6 +78,7 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/reminders', reminderRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 // ✅ Health check
 app.get('/', (req, res) => {
@@ -155,9 +160,18 @@ const startServer = async () => {
     await runInitialReminderCleanup();
     startReminderWorker();
     
+    // ✅ Start the Groq assistant (check if API key is available)
+    if (process.env.GROQ_API_KEY) {
+      console.log('🤖 Groq Assistant: ENABLED');
+      console.log(`📌 Model: ${process.env.GROQ_ASSISTANT_MODEL || 'llama-3.3-70b-versatile'}`);
+    } else {
+      console.log('⚠️ Groq Assistant: DISABLED (GROQ_API_KEY not set)');
+    }
+    
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
+      console.log(`📍 Assistant endpoint: http://localhost:${PORT}/api/v1/assistant/chat`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
