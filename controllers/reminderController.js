@@ -1,426 +1,355 @@
-import Reminder from '../models/Reminder.js';
-import { registerPushToken } from '../services/notificationService.js';
+import { DateTime } from 'luxon';
+import Item from '../models/Item.js';
+import User from '../models/User.js'; // ✅ Fixed: User imported
+import { invalidateDashboardCache } from './dashboardController.js';
+import { sendPushNotification } from '../services/pushNotificationService.js';
+import { generateReminderAudio, formatReminderText } from '../services/voiceReminderService.js';
 
-// @desc    Schedule a new reminder
-// @route   POST /api/v1/reminders/schedule
-// @access  Private
-export const scheduleReminder = async (req, res) => {
-  try {
-    const {
-      title,
-      message,
-      scheduledFor,
-      priority = 'medium',
-      category = 'General',
-      context = '',
-      isClientBooking = false,
-      clientName = '',
-      clientEmail = '',
-      tags = [],
-      followUpRequired = false,
-    } = req.body;
-
-    // Validate required fields
-    if (!title || !message || !scheduledFor) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide title, message, and scheduledFor',
-      });
-    }
-
-    const scheduledDate = new Date(scheduledFor);
-    if (scheduledDate < new Date()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Scheduled time must be in the future',
-      });
-    }
-
-    const reminder = await Reminder.create({
-      userId: req.user._id,
-      title,
-      message,
-      scheduledFor: scheduledDate,
-      priority,
-      category,
-      context,
-      isClientBooking,
-      clientName,
-      clientEmail,
-      tags,
-      followUpRequired,
-    });
-
-    res.status(201).json({
-      success: true,
-      data: reminder,
-      message: 'Reminder scheduled successfully',
-    });
-  } catch (error) {
-    console.error('❌ Schedule reminder error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to schedule reminder',
-      error: error.message,
-    });
-  }
-};
-
-// @desc    Get all reminders for user
-// @route   GET /api/v1/reminders
-// @access  Private
+/**
+ * Get all reminders for the user (with pagination)
+ */
 export const getReminders = async (req, res) => {
   try {
-    const { status, limit = 50, page = 1 } = req.query;
-    const skip = (page - 1) * limit;
+    const { status, type, limit = 20, page = 1 } = req.query;
+    
+    const query = {
+      userId: req.user._id,
+      type: { $in: ['Reminder', 'Event'] }, // Both types are "reminder-like"
+    };
+    
+    if (status) query.status = status;
+    if (type) query.type = type;
 
-    const query = { userId: req.user._id };
-    if (status) {
-      query.status = status;
-    }
+    const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const reminders = await Reminder.find(query)
-      .sort({ scheduledFor: 1 })
-      .skip(skip)
-      .limit(parseInt(limit));
+    const [reminders, total] = await Promise.all([
+      Item.find(query)
+        .sort({ startTime: 1, createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Item.countDocuments(query),
+    ]);
 
-    const total = await Reminder.countDocuments(query);
-
-    res.status(200).json({
+    res.json({
       success: true,
-      data: reminders,
+      reminders: reminders.map(r => ({
+        id: r._id,
+        title: r.title,
+        content: r.content,
+        type: r.type,
+        status: r.status,
+        startTime: r.startTime,
+        endTime: r.endTime,
+        priority: r.priority,
+        category: r.category,
+        createdAt: r.createdAt,
+        formattedText: formatReminderText(r),
+      })),
       pagination: {
         total,
         page: parseInt(page),
         limit: parseInt(limit),
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / parseInt(limit)),
       },
     });
   } catch (error) {
-    console.error('❌ Get reminders error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get reminders',
-      error: error.message,
-    });
+    console.error('❌ Failed to get reminders:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
-// @desc    Get a single reminder
-// @route   GET /api/v1/reminders/:id
-// @access  Private
-export const getReminder = async (req, res) => {
+/**
+ * Get upcoming reminders (next hour)
+ */
+export const getUpcomingReminders = async (req, res) => {
   try {
-    const reminder = await Reminder.findOne({
-      _id: req.params.id,
+    const { timezone = 'Asia/Karachi' } = req.query;
+    const now = DateTime.now().setZone(timezone);
+    const nextHour = now.plus({ hours: 1 });
+
+    const reminders = await Item.find({
       userId: req.user._id,
-    });
+      type: 'Reminder',
+      status: 'active',
+      startTime: {
+        $gte: now.toJSDate(),
+        $lt: nextHour.toJSDate(),
+      },
+    }).sort({ startTime: 1 });
 
-    if (!reminder) {
-      return res.status(404).json({
-        success: false,
-        message: 'Reminder not found',
-      });
-    }
-
-    res.status(200).json({
+    res.json({
       success: true,
-      data: reminder,
+      reminders: reminders.map(r => ({
+        id: r._id,
+        title: r.title,
+        content: r.content,
+        startTime: r.startTime,
+        formattedText: formatReminderText(r),
+      })),
     });
   } catch (error) {
-    console.error('❌ Get reminder error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get reminder',
-      error: error.message,
-    });
+    console.error('❌ Failed to get upcoming reminders:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
-// @desc    Snooze a reminder
-// @route   POST /api/v1/reminders/:id/snooze
-// @access  Private
+/**
+ * Snooze a reminder (Item)
+ */
 export const snoozeReminder = async (req, res) => {
   try {
-    const { minutes = 10 } = req.body;
+    const { minutes, until } = req.body;
+    const { timezone = 'Asia/Karachi' } = req.query;
+    const itemId = req.params.id;
 
-    if (!minutes || minutes < 1) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide valid minutes (minimum 1)',
-      });
+    const item = await Item.findOne({ _id: itemId, userId: req.user._id });
+    if (!item) {
+      return res.status(404).json({ success: false, error: 'Reminder not found' });
     }
 
-    const reminder = await Reminder.findOne({
-      _id: req.params.id,
-      userId: req.user._id,
-    });
+    const now = DateTime.now().setZone(timezone);
+    let newStartTime = null;
 
-    if (!reminder) {
-      return res.status(404).json({
-        success: false,
-        message: 'Reminder not found',
-      });
+    if (minutes) {
+      newStartTime = now.plus({ minutes }).toJSDate();
+    } else if (until) {
+      const parsed = DateTime.fromISO(until).setZone(timezone);
+      if (parsed.isValid) {
+        newStartTime = parsed.toJSDate();
+      } else {
+        return res.status(400).json({ success: false, error: 'Invalid date format for "until"' });
+      }
+    } else {
+      newStartTime = now.plus({ minutes: 5 }).toJSDate();
     }
 
-    if (reminder.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot snooze a completed reminder',
-      });
-    }
+    item.startTime = newStartTime;
+    item.status = 'active';
+    await item.save();
+    invalidateDashboardCache(req.user._id);
 
-    if (reminder.snoozeCount >= reminder.maxSnoozes) {
-      return res.status(400).json({
-        success: false,
-        message: `Maximum snoozes (${reminder.maxSnoozes}) reached`,
-      });
-    }
-
-    await reminder.snooze(minutes);
-
-    res.status(200).json({
+    res.json({
       success: true,
-      data: reminder,
-      message: `Reminder snoozed for ${minutes} minutes`,
+      item: {
+        id: item._id,
+        title: item.title,
+        startTime: item.startTime,
+      },
+      message: `Snoozed until ${DateTime.fromJSDate(newStartTime).setZone(timezone).toFormat('yyyy-MM-dd HH:mm')}`,
     });
   } catch (error) {
-    console.error('❌ Snooze reminder error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to snooze reminder',
-      error: error.message,
-    });
+    console.error('❌ Failed to snooze:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
-// @desc    Complete a reminder
-// @route   POST /api/v1/reminders/:id/complete
-// @access  Private
+/**
+ * Complete a reminder (Item)
+ */
 export const completeReminder = async (req, res) => {
   try {
-    const reminder = await Reminder.findOne({
-      _id: req.params.id,
+    const itemId = req.params.id;
+
+    const item = await Item.findOne({ _id: itemId, userId: req.user._id });
+    if (!item) {
+      return res.status(404).json({ success: false, error: 'Reminder not found' });
+    }
+
+    item.status = 'completed';
+    item.completedAt = new Date().toISOString();
+    await item.save();
+    invalidateDashboardCache(req.user._id);
+
+    res.json({
+      success: true,
+      item: {
+        id: item._id,
+        title: item.title,
+        status: item.status,
+      },
+      message: `✅ Completed: ${item.title}`,
+    });
+  } catch (error) {
+    console.error('❌ Failed to complete:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Get tasks needing check-in
+ */
+export const getCheckInTasks = async (req, res) => {
+  try {
+    const { timezone = 'Asia/Karachi' } = req.query;
+    const now = DateTime.now().setZone(timezone);
+    const today = now.startOf('day');
+
+    const tasks = await Item.find({
       userId: req.user._id,
+      type: 'Task',
+      status: 'active',
+      startTime: {
+        $gte: today.toJSDate(),
+        $lt: now.toJSDate(),
+      },
+    }).sort({ startTime: 1 });
+
+    const checkinTasks = tasks.filter(task => {
+      if (!task.startTime) return false;
+      const scheduled = DateTime.fromISO(task.startTime).setZone(timezone);
+      const minutesPassed = now.diff(scheduled, 'minutes').minutes;
+      return minutesPassed >= 15 && minutesPassed <= 45;
     });
 
-    if (!reminder) {
-      return res.status(404).json({
-        success: false,
-        message: 'Reminder not found',
-      });
-    }
-
-    await reminder.complete();
-
-    res.status(200).json({
+    res.json({
       success: true,
-      data: reminder,
-      message: 'Reminder marked as complete',
+      tasks: checkinTasks.map(t => ({
+        id: t._id,
+        title: t.title,
+        content: t.content,
+        startTime: t.startTime,
+        formattedText: `Did you complete "${t.title}"?`,
+      })),
     });
   } catch (error) {
-    console.error('❌ Complete reminder error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to complete reminder',
-      error: error.message,
-    });
+    console.error('❌ Failed to get check-in tasks:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
-// @desc    Cancel a reminder
-// @route   POST /api/v1/reminders/:id/cancel
-// @access  Private
-export const cancelReminder = async (req, res) => {
+/**
+ * Respond to a task check-in
+ */
+export const respondToCheckIn = async (req, res) => {
   try {
-    const reminder = await Reminder.findOne({
-      _id: req.params.id,
-      userId: req.user._id,
-    });
+    const { response } = req.body; // 'done', 'working_on_it', 'snooze', 'reschedule'
+    const { timezone = 'Asia/Karachi' } = req.query;
+    const itemId = req.params.id;
 
-    if (!reminder) {
-      return res.status(404).json({
-        success: false,
-        message: 'Reminder not found',
-      });
+    const item = await Item.findOne({ _id: itemId, userId: req.user._id });
+    if (!item) {
+      return res.status(404).json({ success: false, error: 'Item not found' });
     }
 
-    reminder.status = 'cancelled';
-    await reminder.save();
+    let result = {};
+    const now = DateTime.now().setZone(timezone);
 
-    res.status(200).json({
-      success: true,
-      data: reminder,
-      message: 'Reminder cancelled',
-    });
-  } catch (error) {
-    console.error('❌ Cancel reminder error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to cancel reminder',
-      error: error.message,
-    });
-  }
-};
+    switch (response) {
+      case 'done':
+        item.status = 'completed';
+        item.completedAt = new Date().toISOString();
+        await item.save();
+        invalidateDashboardCache(req.user._id);
+        result = { item, message: `✅ Completed: ${item.title}` };
+        break;
 
-// @desc    Mark reminder as read
-// @route   POST /api/v1/reminders/:id/read
-// @access  Private
-export const markAsRead = async (req, res) => {
-  try {
-    const reminder = await Reminder.findOne({
-      _id: req.params.id,
-      userId: req.user._id,
-    });
+      case 'working_on_it':
+        result = { item, message: '✅ Keep going! You\'re working on this.' };
+        break;
 
-    if (!reminder) {
-      return res.status(404).json({
-        success: false,
-        message: 'Reminder not found',
-      });
-    }
+      case 'snooze':
+        item.startTime = now.plus({ minutes: 15 }).toJSDate();
+        item.status = 'active';
+        await item.save();
+        invalidateDashboardCache(req.user._id);
+        result = { 
+          item, 
+          message: `⏰ Snoozed for 15 minutes until ${now.plus({ minutes: 15 }).toFormat('HH:mm')}` 
+        };
+        break;
 
-    await reminder.markAsRead();
-
-    res.status(200).json({
-      success: true,
-      data: reminder,
-      message: 'Reminder marked as read',
-    });
-  } catch (error) {
-    console.error('❌ Mark as read error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to mark as read',
-      error: error.message,
-    });
-  }
-};
-
-// @desc    Process due reminders (called by background worker)
-// @route   GET /api/v1/reminders/process-due
-// @access  Private (internal)
-export const processDueReminders = async (req, res) => {
-  try {
-    const dueReminders = await Reminder.getDueReminders();
-
-    const processed = [];
-    for (const reminder of dueReminders) {
-      reminder.lastRemindedAt = new Date();
-      await reminder.save();
-
-      processed.push({
-        reminder: reminder,
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      processed: processed.length,
-      data: processed,
-    });
-  } catch (error) {
-    console.error('❌ Process due reminders error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to process reminders',
-      error: error.message,
-    });
-  }
-};
-
-// @desc    Create a reminder from voice note
-// @route   POST /api/v1/reminders/from-voice
-// @access  Private
-export const createFromVoice = async (req, res) => {
-  try {
-    const { transcript, scheduledFor } = req.body;
-
-    if (!transcript) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide transcript',
-      });
-    }
-
-    // Simple NLP to extract reminder info
-    let title = 'Reminder';
-    let message = transcript;
-    let parsedScheduledFor = scheduledFor || new Date(Date.now() + 3600000);
-
-    // Try to extract time from transcript
-    const timeMatch = transcript.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
-    if (timeMatch) {
-      try {
-        const parsed = new Date();
-        const timeStr = timeMatch[1];
-        const hours = parseInt(timeStr);
-        const isPM = timeStr.toLowerCase().includes('pm');
-        parsed.setHours(isPM ? hours + 12 : hours, 0, 0, 0);
-        if (parsed > new Date()) {
-          parsedScheduledFor = parsed;
+      case 'reschedule':
+        const { newDate, newTime } = req.body;
+        if (newDate && newTime) {
+          const newStart = DateTime.fromISO(`${newDate}T${newTime}`).setZone(timezone);
+          if (newStart.isValid) {
+            item.startTime = newStart.toJSDate();
+            await item.save();
+            invalidateDashboardCache(req.user._id);
+            result = { 
+              item, 
+              message: `✅ Rescheduled to ${newStart.toFormat('yyyy-MM-dd HH:mm')}` 
+            };
+          } else {
+            return res.status(400).json({ success: false, error: 'Invalid date/time format' });
+          }
+        } else {
+          return res.status(400).json({ success: false, error: 'New date/time required for reschedule' });
         }
-      } catch (e) {
-        // Fallback to default
-      }
+        break;
+
+      default:
+        return res.status(400).json({ success: false, error: 'Invalid response type' });
     }
 
-    const reminder = await Reminder.create({
-      userId: req.user._id,
-      title: title,
-      message: message,
-      scheduledFor: parsedScheduledFor,
-      context: 'Created from voice note',
-    });
-
-    res.status(201).json({
+    res.json({
       success: true,
-      data: reminder,
-      message: 'Reminder created from voice',
+      ...result,
     });
   } catch (error) {
-    console.error('❌ Voice reminder error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create reminder from voice',
-      error: error.message,
-    });
+    console.error('❌ Failed to process check-in response:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
-// @desc    Register push token for user
-// @route   POST /api/v1/reminders/register-token
-// @access  Private
+/**
+ * Hear Now - Generate TTS audio for a reminder
+ */
+export const hearNow = async (req, res) => {
+  try {
+    const itemId = req.params.id;
+
+    const item = await Item.findOne({ _id: itemId, userId: req.user._id });
+    if (!item) {
+      return res.status(404).json({ success: false, error: 'Reminder not found' });
+    }
+
+    const text = formatReminderText(item);
+    const audio = await generateReminderAudio(text);
+
+    if (!audio) {
+      // Fallback: return the text so client can use device TTS
+      return res.json({
+        success: true,
+        audioUrl: null,
+        text: text,
+        useDeviceTTS: true,
+      });
+    }
+
+    res.json({
+      success: true,
+      audioUrl: audio.audioUrl,
+      text: text,
+      useDeviceTTS: false,
+    });
+  } catch (error) {
+    console.error('❌ Failed to generate TTS:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Register push token (stored in User model)
+ */
 export const registerToken = async (req, res) => {
   try {
-    const { pushToken } = req.body;
-
-    if (!pushToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide a push token',
-      });
+    const { expoPushToken, platform } = req.body;
+    
+    if (!expoPushToken) {
+      return res.status(400).json({ success: false, error: 'expoPushToken is required' });
     }
 
-    const result = await registerPushToken(req.user._id, pushToken);
-
-    if (result.success) {
-      res.status(200).json({
-        success: true,
-        message: result.message,
-      });
-    } else {
-      res.status(400).json({
-        success: false,
-        message: result.message || 'Failed to register token',
-      });
-    }
-  } catch (error) {
-    console.error('❌ Register token error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to register push token',
-      error: error.message,
+    await User.findByIdAndUpdate(req.user._id, {
+      expoPushToken,
+      platform: platform || 'unknown',
+      pushTokenUpdatedAt: new Date(),
     });
+
+    res.json({ success: true, message: 'Push token registered successfully' });
+  } catch (error) {
+    console.error('❌ Failed to register push token:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };

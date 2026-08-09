@@ -6,7 +6,8 @@ import { invalidateDashboardCache } from '../controllers/dashboardController.js'
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const ASSISTANT_MODEL = process.env.GROQ_ASSISTANT_MODEL || 'llama-3.3-70b-versatile';
+const ASSISTANT_MODEL = process.env.GROQ_ASSISTANT_MODEL || process.env.GROQ_AI_MODEL || 'llama-3.3-70b-versatile';
+const FALLBACK_MODEL = 'llama-3.1-8b-instant';
 
 export const isAssistantAvailable = () => Boolean(process.env.GROQ_API_KEY);
 
@@ -86,7 +87,7 @@ const tools = [
     type: 'function',
     function: {
       name: 'updateItem',
-      description: "Update an existing item's fields (e.g. reschedule, rename, change status).",
+      description: "Update an existing item's fields (e.g. reschedule, rename, change status). Use this to mark items as complete (status: 'completed'), reschedule (date/time), or rename.",
       parameters: {
         type: 'object',
         properties: {
@@ -144,7 +145,7 @@ const tools = [
     type: 'function',
     function: {
       name: 'searchItems',
-      description: 'Search the user\'s items by title or content text. Use this when the user asks "find my note about..." or "search for..."',
+      description: 'Search the user\'s items by title or content text. Use this when the user asks "find my note about..." or "search for..." or when you need to find an item by name to snooze/update/delete it.',
       parameters: {
         type: 'object',
         properties: {
@@ -221,7 +222,6 @@ async function executeTool(name, args, { userId, timezone }) {
       if (args.type) query.type = args.type;
       if (args.status) query.status = args.status;
 
-      // ✅ DATE RANGE FILTERING
       const now = DateTime.now().setZone(timezone);
       const startOfToday = now.startOf('day').toJSDate();
       const endOfToday = now.endOf('day').toJSDate();
@@ -237,7 +237,6 @@ async function executeTool(name, args, { userId, timezone }) {
         query.startTime = { $lt: nowJs };
         if (!args.status) query.status = 'active';
       }
-      // 'all' or no `when` → no date filter
 
       const items = await Item.find(query)
         .sort({ startTime: 1, createdAt: -1 })
@@ -370,12 +369,55 @@ function trimHistory(messages, maxLength = 300) {
 }
 
 // ---------------------------------------------------------------------------
+// ✅ Helper: Call Groq with rate limit retries
+// ---------------------------------------------------------------------------
+async function callGroqWithRetries(model, messages, tools, temperature, maxRetries = 3) {
+  let lastError = null;
+  let delay = 2000; // Start with 2 seconds
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await groq.chat.completions.create({
+        model,
+        messages,
+        tools,
+        tool_choice: 'auto',
+        temperature,
+      });
+    } catch (err) {
+      lastError = err;
+      
+      // If it's a rate limit (429), wait and retry
+      if (err.status === 429) {
+        // Try to get retry-after header, fallback to exponential backoff
+        const retryAfterMs = err.headers?.['retry-after']
+          ? parseInt(err.headers['retry-after']) * 1000
+          : delay;
+        
+        console.warn(`⏳ Rate limited (attempt ${attempt + 1}/${maxRetries}) — waiting ${retryAfterMs}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+        
+        // Increase delay for next retry (exponential backoff)
+        delay = Math.min(delay * 1.5, 10000); // Max 10 seconds
+        continue;
+      }
+      
+      // For other errors, don't retry
+      throw err;
+    }
+  }
+  
+  // All retries exhausted
+  console.error('❌ All rate limit retries exhausted');
+  throw lastError;
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point with ALL FIXES
 // ---------------------------------------------------------------------------
 export async function runAssistantTurn({ message, history = [], userId, timezone = 'Asia/Karachi', activeItem = null }) {
   const nowLocal = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd HH:mm');
 
-  // ✅ ENHANCED SYSTEM PROMPT
   let systemPrompt = `You are the SayNotes assistant. You help the user create and manage notes, tasks, events, and reminders through natural conversation — like a friendly support widget, not a rigid form.
 
 Current date/time for the user (${timezone}): ${nowLocal}.
@@ -388,6 +430,9 @@ Guidelines:
 - Never call deleteItem without clear confirmation from the user in this conversation.
 - For snooze requests, use snoozeItem with either minutes or until.
 - For search requests, use searchItems.
+- IMPORTANT: snoozeItem, updateItem, and deleteItem all require an itemId. If you don't already know the itemId (no active item in context, and none mentioned earlier in this conversation), you MUST first call listItems or searchItems to find the matching item by its title, then use the id from that result. Never guess or invent an itemId.
+- If your lookup finds more than one plausible match, briefly ask the user which one they mean instead of picking one.
+- If your lookup finds no match, tell the user you couldn't find that item instead of calling snoozeItem/updateItem/deleteItem anyway.
 - When calling functions, numeric parameters like "limit" must be actual JSON numbers, never quoted strings (correct: {"limit": 10}, wrong: {"limit": "10"}).
 - When the user asks about "today", "upcoming", or "overdue" items, always pass the matching 'when' parameter to listItems — never try to filter by date yourself from unfiltered results.`;
 
@@ -397,50 +442,64 @@ Guidelines:
 
   systemPrompt += `\n\nCurrent user: ${userId}`;
 
+  // ✅ Only send last 15 messages to Groq to prevent context bloat
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...history,
+    ...history.slice(-15),
     { role: 'user', content: message },
   ];
 
+  const callGroq = async (model, temperature) => {
+    return callGroqWithRetries(model, messages, tools, temperature);
+  };
+
   for (let turn = 0; turn < 4; turn++) {
     let completion;
-    
+
     try {
-      completion = await groq.chat.completions.create({
-        model: ASSISTANT_MODEL,
-        messages,
-        tools,
-        tool_choice: 'auto',
-        temperature: 0.4,
-      });
+      completion = await callGroq(ASSISTANT_MODEL, 0.4);
     } catch (err) {
-      console.warn('⚠️ Groq call failed, retrying once:', err.message);
-      
-      const isToolError = err.message?.includes('tool_use_failed') || 
-                          err.message?.includes('invalid') ||
-                          err.message?.includes('parse');
-      
-      if (isToolError) {
-        console.warn('🔄 Tool use failed — retrying with lower temperature for cleaner output');
+      console.error('❌ Groq call failed [primary model]:', {
+        message: err.message,
+        status: err.status,
+        code: err.error?.code || err.code,
+        type: err.error?.type,
+      });
+
+      // Check if it's a model issue (deprecated/unavailable)
+      const isModelIssue =
+        err.status === 400 ||
+        err.status === 404 ||
+        /model/i.test(err.message || '');
+
+      if (isModelIssue) {
         try {
-          completion = await groq.chat.completions.create({
-            model: ASSISTANT_MODEL,
-            messages,
-            tools,
-            tool_choice: 'auto',
-            temperature: 0.1,
+          console.warn(`🔄 Falling back to ${FALLBACK_MODEL}...`);
+          completion = await callGroq(FALLBACK_MODEL, 0.3);
+        } catch (fallbackErr) {
+          console.error('❌ Fallback model also failed:', {
+            message: fallbackErr.message,
+            status: fallbackErr.status,
           });
+          const trimmed = trimHistory(messages.slice(1));
+          return {
+            reply: "Sorry, I'm having trouble reaching the assistant right now. Please try again in a moment.",
+            history: trimmed,
+          };
+        }
+      } else {
+        // Non-rate-limit, non-model error - one retry
+        try {
+          console.warn('🔄 Retrying with same model...');
+          completion = await callGroq(ASSISTANT_MODEL, 0.4);
         } catch (retryErr) {
-          console.error('❌ Retry also failed:', retryErr.message);
+          console.error('❌ Groq retry also failed:', retryErr.message);
           const trimmed = trimHistory(messages.slice(1));
           return {
             reply: "Sorry, I had trouble understanding that — could you try rephrasing?",
             history: trimmed,
           };
         }
-      } else {
-        throw err;
       }
     }
 

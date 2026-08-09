@@ -1,21 +1,17 @@
 import express from 'express';
-import { hearNow } from '../controllers/notificationController.js';
-
-const router = express.Router();
+import { protect } from '../middleware/authMiddleware.js';
 import {
-  scheduleReminder,
-  getReminders,
-  getReminder,
+  getUpcomingReminders,
+  getReminders, // ✅ Added list endpoint
   snoozeReminder,
   completeReminder,
-  cancelReminder,
-  markAsRead,
-  processDueReminders,
-  createFromVoice,
-  registerToken,
+  getCheckInTasks,
+  respondToCheckIn,
+  hearNow,
+  registerToken, // ✅ Fixed: registerToken is now imported
 } from '../controllers/reminderController.js';
 
-import { protect } from '../middleware/authMiddleware.js';
+const router = express.Router();
 
 // All reminder routes are protected
 router.use(protect);
@@ -23,26 +19,19 @@ router.use(protect);
 // Register push token
 router.post('/register-token', registerToken);
 
-// Main routes
-router.route('/')
-  .get(getReminders)
-  .post(scheduleReminder);
+// Get reminders list (with pagination/filtering)
+router.get('/', getReminders);
 
-// Voice reminder
-router.post('/from-voice', createFromVoice);
+// Get upcoming reminders (next hour)
+router.get('/upcoming', getUpcomingReminders);
 
-// Process due reminders (internal)
-router.get('/process-due', processDueReminders);
+// Get tasks needing check-in
+router.get('/checkin', getCheckInTasks);
 
-// Individual reminder routes
-router.route('/:id')
-  .get(getReminder)
-  .delete(cancelReminder);
-
-// Actions
+// Actions on reminders (Items)
 router.post('/:id/snooze', snoozeReminder);
 router.post('/:id/complete', completeReminder);
-router.post('/:id/read', markAsRead);
 router.post('/:id/hear-now', hearNow);
+router.post('/:id/checkin-response', respondToCheckIn);
 
 export default router;

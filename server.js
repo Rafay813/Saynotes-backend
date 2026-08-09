@@ -4,7 +4,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { startAutoDeleteWorker, runInitialCleanup } from './workers/autoDeleteWorker.js';
 import syncRoutes from './routes/syncRoutes.js';
 
 // Import routes
@@ -14,12 +13,17 @@ import dashboardRoutes from './routes/dashboardRoutes.js';
 import voiceRoutes from './routes/voiceRoutes.js';
 import calendarRoutes from './routes/calendarRoutes.js';
 
-// ✅ Import reminder routes and worker
+// ✅ Import reminder routes
 import reminderRoutes from './routes/reminderRoutes.js';
-import { startReminderWorker, runInitialReminderCleanup } from './workers/reminderWorker.js';
 
 // ✅ Import assistant routes
 import assistantRoutes from './routes/assistantRoutes.js';
+
+// ✅ Import auto-delete worker functions
+import { startAutoDeleteWorker, runInitialCleanup } from './workers/autoDeleteWorker.js';
+
+// ✅ Import reminder worker functions (ONLY from itemReminderWorker.js)
+import { startReminderWorker, runInitialReminderCleanup } from './workers/itemReminderWorker.js';
 
 // Load environment variables
 dotenv.config();
@@ -130,14 +134,7 @@ const createIndexes = async () => {
       { key: { userId: 1, startTime: 1 } },
       { key: { userId: 1, createdAt: -1 } },
       { key: { deleteAfter: 1 } },
-    ]);
-    
-    // ✅ Create indexes for reminders
-    await db.collection('reminders').createIndexes([
-      { key: { userId: 1, scheduledFor: 1 } },
-      { key: { userId: 1, status: 1 } },
-      { key: { scheduledFor: 1, status: 1 } },
-      { key: { snoozedUntil: 1 } },
+      { key: { userId: 1, status: 1, startTime: 1 } },
     ]);
     
     console.log('✅ Database indexes created');
@@ -152,7 +149,7 @@ const startServer = async () => {
     await connectDB();
     console.log('✅ Database connected');
     
-    // ✅ Run initial cleanup
+    // ✅ Run initial cleanup (auto-delete expired items)
     await runInitialCleanup();
     startAutoDeleteWorker();
     
@@ -172,6 +169,7 @@ const startServer = async () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
       console.log(`📍 Assistant endpoint: http://localhost:${PORT}/api/v1/assistant/chat`);
+      console.log(`📍 Reminder endpoint: http://localhost:${PORT}/api/v1/reminders`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

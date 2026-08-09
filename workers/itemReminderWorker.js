@@ -7,7 +7,7 @@ import { generateReminderAudio, formatReminderText } from '../services/voiceRemi
 let reminderWorkerInterval = null;
 
 /**
- * Check for due reminders and send notifications
+ * Process due reminders (Items with type: 'Reminder')
  */
 export const processDueReminders = async () => {
   try {
@@ -15,7 +15,7 @@ export const processDueReminders = async () => {
     const startOfMinute = now.startOf('minute').toJSDate();
     const endOfMinute = now.endOf('minute').toJSDate();
 
-    // Find active reminders due in this minute (Items with type: 'Reminder')
+    // Find active reminders due in this minute
     const dueReminders = await Item.find({
       type: 'Reminder',
       status: 'active',
@@ -23,7 +23,7 @@ export const processDueReminders = async () => {
         $gte: startOfMinute,
         $lte: endOfMinute,
       },
-    }).populate('userId', 'expoPushToken name email');
+    });
 
     console.log(`⏰ Found ${dueReminders.length} due reminders`);
 
@@ -31,7 +31,7 @@ export const processDueReminders = async () => {
       await sendReminderNotification(reminder);
     }
 
-    // Also check for tasks needing check-in (15-30 min after start)
+    // Also check for tasks needing check-in (15-45 min after start)
     const checkinTasks = await Item.find({
       type: 'Task',
       status: 'active',
@@ -39,10 +39,17 @@ export const processDueReminders = async () => {
         $lt: now.minus({ minutes: 15 }).toJSDate(),
         $gt: now.minus({ minutes: 45 }).toJSDate(),
       },
-    }).populate('userId', 'expoPushToken name email');
+    });
 
     for (const task of checkinTasks) {
+      // Skip if already triggered
+      if (task.checkInTriggered) continue;
+      
       await sendCheckInNotification(task);
+      
+      // Mark as triggered to avoid duplicate notifications
+      task.checkInTriggered = true;
+      await task.save();
     }
   } catch (error) {
     console.error('❌ Error processing due reminders:', error);
@@ -73,9 +80,8 @@ const sendReminderNotification = async (reminder) => {
       console.warn('⚠️ Failed to generate TTS audio:', error.message);
     }
 
-    // Send push notification
     const result = await sendPushNotification({
-      to: user.expoPushToken,
+      userId: reminder.userId.toString(),
       title: '⏰ Reminder',
       body: reminder.title,
       data: {
@@ -111,11 +117,11 @@ const sendCheckInNotification = async (task) => {
     }
 
     const result = await sendPushNotification({
-      to: user.expoPushToken,
+      userId: task.userId.toString(),
       title: '📋 Task Check-In',
       body: `Did you complete "${task.title}"?`,
       data: {
-        type: 'checkin',
+        type: 'check_in',
         itemId: task._id.toString(),
         title: task.title,
         content: task.content || '',
@@ -141,7 +147,7 @@ export const startReminderWorker = () => {
     clearInterval(reminderWorkerInterval);
   }
 
-  console.log('⏰ Starting reminder worker...');
+  console.log('⏰ Starting item reminder worker...');
   
   // Run immediately
   processDueReminders();
@@ -166,8 +172,9 @@ export const stopReminderWorker = () => {
  */
 export const runInitialReminderCleanup = async () => {
   try {
-    // Mark expired reminders as expired
     const now = new Date();
+    
+    // Mark expired reminders as expired
     const result = await Item.updateMany(
       {
         type: 'Reminder',
