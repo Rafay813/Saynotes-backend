@@ -1,4 +1,5 @@
 import Groq from 'groq-sdk';
+import { DateTime } from 'luxon';
 
 // Constants
 const AI_MODEL = process.env.GROQ_AI_MODEL || 'llama-3.3-70b-versatile';
@@ -28,10 +29,16 @@ try {
 
 export const isGroqAvailable = () => isGroqInitialized && !!groq;
 
-// ✅ SYSTEM_PROMPT - AI generates title AND extracts metadata
-const SYSTEM_PROMPT = `You are an intent classifier and title generator for a voice note app. Extract structured information from the user's transcript.
+// ✅ ENHANCED SYSTEM_PROMPT with clearer classification rules and few-shot examples
+const SYSTEM_PROMPT = `You are a classifier for a voice productivity app. Given a spoken transcript, determine the type, title, and extract any metadata mentioned.
 
 CRITICAL: You MUST extract the date and time if mentioned. Pay special attention to phrases like "at 7 pm", "tomorrow at 2 PM", "July 20 at 7pm".
+
+CLASSIFICATION RULES — check in this order:
+1. Does it mention meeting/calling/seeing another specific person AT a specific time? → "Event"
+2. Does it say "remind me" or imply a time-based nudge for something personal (call someone, take medicine, leave somewhere)? → "Reminder"
+3. Does it describe something to complete/finish/do, with or without a deadline (buy, finish, submit, clean, write)? → "Task"
+4. Otherwise — general thought, idea, information, no clear action or time → "Note"
 
 TITLE GENERATION (most important field):
 Generate a specific, natural title that a person could scan at a glance and immediately
@@ -57,21 +64,19 @@ Title rules:
 - Every title should be distinct enough that two different voice notes don't produce the same
   generic title (e.g. avoid collapsing different meetings down to just "Meeting with client").
 
-Title examples (study the trimming pattern closely):
-- "Schedule a meeting with James tomorrow at 3 PM" -> "Meeting with James tomorrow at 3 PM"
-- "Book a dentist appointment with Dr. Ahmed on July 20" -> "Dentist appointment with Dr. Ahmed on July 20"
-- "Client meeting with Shubham at 7 pm tomorrow" -> "Meeting with Shubham at 7 PM tomorrow"
-- "Meet him with Sir Ousman at Udilhavr on 9pm tomorrow" -> "Meeting with Sir Ousman at Udilhavr, 9 PM tomorrow"
-- "Meeting with client Sarah about the Q3 budget next Tuesday" -> "Meeting with Sarah about Q3 budget, next Tuesday"
-- "Send calendar invite to the clinic for next week" -> "Send calendar invite to the clinic, next week"
-- "Please remind me to call mom at 9 PM" -> "Call mom at 9 PM"
-- "I need to buy milk, eggs and bread after work" -> "Buy milk, eggs and bread after work"
+FEW-SHOT EXAMPLES (study these for classification and title patterns):
+Transcript: "remind me to call mom tomorrow at 9am" → {"type": "Reminder", "title": "Call mom at 9 AM tomorrow", "date": "tomorrow", "time": "9 AM", "person": "mom"}
+Transcript: "meeting with Sarah at 3pm about the budget" → {"type": "Event", "title": "Meeting with Sarah about budget at 3 PM", "date": "today", "time": "3 PM", "person": "Sarah"}
+Transcript: "buy milk and eggs" → {"type": "Task", "title": "Buy milk and eggs", "items": ["milk", "eggs"]}
+Transcript: "idea for the app: add dark mode" → {"type": "Note", "title": "Idea: add dark mode"}
+Transcript: "finish the report by Friday" → {"type": "Task", "title": "Finish the report by Friday", "date": "Friday"}
+Transcript: "urgent, call the client back today" → {"type": "Reminder", "title": "Call client back today", "date": "today", "person": "client"}
 
 Extract these fields:
 - type: one of "Note", "Task", "Reminder", "Event"
 - title: string, per the rules above
-- date: the date mentioned (e.g., "today", "tomorrow", "July 20", "20 July 2026", "next Friday")
-- time: the time mentioned (e.g., "7 PM", "7pm", "2:30 PM", "14:00") - ONLY if explicitly mentioned
+- date: the date mentioned (e.g., "today", "tomorrow", "July 20", "next Friday")
+- time: the time mentioned (e.g., "7 PM", "2:30 PM") - ONLY if explicitly mentioned
 - endTime: end time if mentioned (e.g., "5 PM")
 - duration: duration if mentioned (e.g., "1 hour", "30 minutes")
 - person: name of a person if mentioned
@@ -82,12 +87,6 @@ Extract these fields:
 
 IMPORTANT: Only extract time if the user explicitly mentions it. Do NOT add a default time.
 
-Classification rules:
-- "Event": meetings, appointments, calls with a specific time and another person
-- "Reminder": something to be reminded of at a specific time, often personal
-- "Task": something to get done, may or may not have a deadline
-- "Note": general thoughts, ideas, or information with no action/time
-
 Date/time rules:
 - "at 7 pm" → time: "7 PM"
 - "tomorrow at 7 pm" → date: "tomorrow", time: "7 PM"
@@ -96,16 +95,7 @@ Date/time rules:
 - "Buy milk and eggs" → items: ["milk", "eggs"]
 - "Meeting tomorrow" → date: "tomorrow", time: null (no time mentioned)
 
-Return ONLY valid JSON. No explanations, no markdown.
-
-Examples:
-{"type":"Event","title":"Meeting with James tomorrow at 3 PM","person":"James","date":"tomorrow","time":"3 PM"}
-{"type":"Event","title":"Meeting with James on Zoom","person":"James","date":"20 July 2026","time":"7 PM","location":"Zoom"}
-{"type":"Reminder","title":"Call John at 2 PM","person":"John","date":"today","time":"2 PM"}
-{"type":"Reminder","title":"Call mom at 9 PM","person":"mom","time":"9 PM"}
-{"type":"Task","title":"Buy milk, eggs and bread","items":["milk","eggs","bread"]}
-{"type":"Task","title":"Research, write and submit the report","subtasks":["research","write","submit"]}
-{"type":"Note","title":"Idea for the project"}`;
+Return ONLY valid JSON. No explanations, no markdown.`;
 
 function extractJSON(content) {
   const markdownMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
@@ -206,6 +196,24 @@ function generateTitle(parsed, transcript) {
   return title;
 }
 
+// ✅ POST-PROCESSING: Validate and fix classification
+// Parameter renamed from 'startTime' to 'time' for clarity
+function validateClassification(type, time, parsed) {
+  // If type is Event but no time and no person mentioned, downgrade to Task
+  if (type === 'Event') {
+    const hasPerson = parsed.person && parsed.person.trim().length > 0;
+    const hasLocation = parsed.location && parsed.location.trim().length > 0;
+    
+    // An Event without time, person, or location is probably not an event
+    if (!time && !hasPerson && !hasLocation) {
+      console.warn('⚠️ Event classified without time/person/location, downgrading to Task');
+      return 'Task';
+    }
+  }
+  
+  return type;
+}
+
 export const aiParsingService = async (transcript) => {
   const trimmedTranscript = transcript.trim();
   
@@ -237,10 +245,9 @@ export const aiParsingService = async (transcript) => {
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `Transcript: "${trimmedTranscript}"` },
       ],
-      temperature: 0,
+      temperature: 0.2,
       top_p: 1,
       max_tokens: 300,
-      response_format: { type: 'json_object' },
     });
 
     const content = response.choices[0]?.message?.content || '';
@@ -255,13 +262,16 @@ export const aiParsingService = async (transcript) => {
     const parsed = JSON.parse(jsonString);
     console.log('✅ Parsed AI result:', JSON.stringify(parsed, null, 2));
 
-    // ✅ Prefer the AI's own detail-preserving title. generateTitle() now
-    // only acts as a safety-net fallback for the rare case the model omits it.
+    // ✅ Validate and fix classification
+    // Pass parsed.time (string like "9 PM") to the validation function
+    const type = validateClassification(parsed.type || 'Note', parsed.time, parsed);
+    
+    // ✅ Prefer the AI's own detail-preserving title
     const title = parsed.title?.trim() || generateTitle(parsed, trimmedTranscript);
     console.log('📝 Generated title:', title);
 
     return {
-      type: parsed.type || 'Note',
+      type: type,
       title: title,
       date: parsed.date || null,
       time: parsed.time || null,

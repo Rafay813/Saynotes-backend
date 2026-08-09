@@ -45,8 +45,6 @@ function buildBaseQuery(req) {
 
 /**
  * ✅ FIXED: Build Today filter based on calendar day, not current time
- * Items are "Today" if they fall on the current calendar date,
- * regardless of whether the time has passed or not.
  */
 function buildTodayFilter(req, conditions) {
   const timezone = req.query.timezone || 'UTC';
@@ -54,12 +52,9 @@ function buildTodayFilter(req, conditions) {
   
   conditions.push({ status: { $nin: ['expired', 'cancelled'] } });
   
-  // ✅ FIXED: Use calendar day boundaries, not current time
-  // Today = items with startTime today (including past, current, and future times today)
   conditions.push({
     $or: [
       { startTime: { $gte: todayUTC, $lt: tomorrowUTC } },
-      // For items without startTime, use creation date
       { startTime: null, createdAt: { $gte: todayUTC, $lt: tomorrowUTC } },
     ]
   });
@@ -75,7 +70,6 @@ function buildUpcomingFilter(req, conditions) {
   const { tomorrowUTC } = getDayBoundaries(timezone);
   
   conditions.push({ status: { $nin: ['expired', 'cancelled'] } });
-  // ✅ FIXED: Upcoming = items starting from tomorrow onwards
   conditions.push({ startTime: { $gte: tomorrowUTC } });
   
   return { query: { $and: conditions }, sort: { startTime: 1, createdAt: -1 } };
@@ -1003,6 +997,73 @@ export const rescheduleOverdueItem = async (req, res) => {
   }
 };
 
+// ============================================================
+// ✅ SNOWZE ITEM - NEW
+// ============================================================
+
+/**
+ * @desc    Snooze an item by minutes
+ * @route   POST /api/v1/items/:id/snooze
+ * @access  Private
+ */
+export const snoozeItem = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
+    }
+
+    const { minutes } = req.body;
+    const item = await Item.findOne({ 
+      _id: req.params.id, 
+      userId: req.user._id 
+    });
+    
+    if (!item) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Item not found',
+        errorCode: 'NOT_FOUND',
+      });
+    }
+
+    if (item.status === 'expired' || item.deletedAt) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot snooze expired items.',
+        errorCode: 'ITEM_EXPIRED',
+      });
+    }
+
+    const snoozeMinutes = minutes || 5;
+    item.startTime = new Date(Date.now() + snoozeMinutes * 60 * 1000);
+    item.status = 'active';
+    await item.save();
+
+    invalidateDashboardCache(req.user._id);
+
+    res.status(200).json({ 
+      success: true, 
+      item: {
+        id: item._id.toString(),
+        title: item.title,
+        startTime: item.startTime,
+      },
+      message: `Snoozed for ${snoozeMinutes} minutes`
+    });
+  } catch (error) {
+    console.error('❌ Snooze error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to snooze item',
+      errorCode: 'INTERNAL_ERROR',
+    });
+  }
+};
+
 export default {
   getItems,
   getItem,
@@ -1017,4 +1078,5 @@ export default {
   getOverdueItems,
   completeOverdueItem,
   rescheduleOverdueItem,
+  snoozeItem, // ✅ NEW
 };

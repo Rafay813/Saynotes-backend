@@ -6,7 +6,6 @@ import { invalidateDashboardCache } from '../controllers/dashboardController.js'
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// ✅ Use a Groq model that supports tool use
 const ASSISTANT_MODEL = process.env.GROQ_ASSISTANT_MODEL || 'llama-3.3-70b-versatile';
 
 export const isAssistantAvailable = () => Boolean(process.env.GROQ_API_KEY);
@@ -63,7 +62,7 @@ const tools = [
     function: {
       name: 'listItems',
       description:
-        "List the user's existing items, optionally filtered by type and/or status, so you can answer questions like 'what do I have today' or 'show my pending tasks'.",
+        "List the user's existing items. Use the 'when' parameter to filter by date range — this is the reliable way to answer 'what's today', 'what's upcoming', 'what's overdue'. Don't try to filter by date yourself from returned data; always use 'when' instead.",
       parameters: {
         type: 'object',
         properties: {
@@ -71,6 +70,12 @@ const tools = [
           status: {
             type: 'string',
             enum: ['pending_confirmation', 'active', 'completed', 'cancelled', 'expired'],
+          },
+          when: {
+            type: 'string',
+            enum: ['today', 'upcoming', 'overdue', 'all'],
+            description:
+              "'today' = items scheduled for today only. 'upcoming' = items scheduled after today. 'overdue' = active items whose time has already passed. 'all' = no date filter (default).",
           },
           limit: { type: 'number', description: 'Max items to return, default 10.' },
         },
@@ -113,10 +118,53 @@ const tools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'snoozeItem',
+      description: 'Snooze a reminder or event by a certain number of minutes, or until a specific time. Use this when the user says "snooze that for 5 minutes" or "snooze until 3pm".',
+      parameters: {
+        type: 'object',
+        properties: {
+          itemId: { type: 'string', description: 'The _id of the item to snooze.' },
+          minutes: {
+            type: 'number',
+            description: 'Number of minutes to snooze. Use this OR until, not both.',
+          },
+          until: {
+            type: 'string',
+            description: 'Natural language time to snooze until, e.g. "3pm", "tomorrow 9am". Use this OR minutes, not both.',
+          },
+        },
+        required: ['itemId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'searchItems',
+      description: 'Search the user\'s items by title or content text. Use this when the user asks "find my note about..." or "search for..."',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The search query string to look for in titles and content.',
+          },
+          limit: {
+            type: 'number',
+            description: 'Max items to return, default 10.',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
-// Tool execution — actually touches the DB
+// Tool execution
 // ---------------------------------------------------------------------------
 async function executeTool(name, args, { userId, timezone }) {
   switch (name) {
@@ -173,6 +221,24 @@ async function executeTool(name, args, { userId, timezone }) {
       if (args.type) query.type = args.type;
       if (args.status) query.status = args.status;
 
+      // ✅ DATE RANGE FILTERING
+      const now = DateTime.now().setZone(timezone);
+      const startOfToday = now.startOf('day').toJSDate();
+      const endOfToday = now.endOf('day').toJSDate();
+      const nowJs = now.toJSDate();
+
+      if (args.when === 'today') {
+        query.startTime = { $gte: startOfToday, $lte: endOfToday };
+        if (!args.status) query.status = 'active';
+      } else if (args.when === 'upcoming') {
+        query.startTime = { $gt: endOfToday };
+        if (!args.status) query.status = 'active';
+      } else if (args.when === 'overdue') {
+        query.startTime = { $lt: nowJs };
+        if (!args.status) query.status = 'active';
+      }
+      // 'all' or no `when` → no date filter
+
       const items = await Item.find(query)
         .sort({ startTime: 1, createdAt: -1 })
         .limit(args.limit || 10)
@@ -220,29 +286,116 @@ async function executeTool(name, args, { userId, timezone }) {
       return { ok: true, deletedId: args.itemId };
     }
 
+    case 'snoozeItem': {
+      const item = await Item.findOne({ _id: args.itemId, userId });
+      if (!item) return { ok: false, error: 'Item not found' };
+
+      let newStartTime = null;
+      const now = DateTime.now().setZone(timezone);
+
+      if (args.minutes) {
+        newStartTime = now.plus({ minutes: args.minutes }).toJSDate();
+      } else if (args.until) {
+        try {
+          const parsed = parseDateTime(args.until, null, timezone);
+          if (parsed) newStartTime = parsed;
+        } catch (e) {
+          console.warn('⚠️ assistant snoozeItem until parse failed:', e.message);
+        }
+      }
+
+      if (!newStartTime) {
+        newStartTime = now.plus({ minutes: 5 }).toJSDate();
+      }
+
+      item.startTime = newStartTime;
+      item.status = 'active';
+      await item.save();
+      invalidateDashboardCache(userId);
+
+      return {
+        ok: true,
+        item: {
+          id: item._id.toString(),
+          title: item.title,
+          startTime: item.startTime,
+        },
+        message: `Snoozed until ${DateTime.fromJSDate(newStartTime).setZone(timezone).toFormat('yyyy-MM-dd HH:mm')}`,
+      };
+    }
+
+    case 'searchItems': {
+      const query = args.query || '';
+      const limit = args.limit || 10;
+
+      const results = await Item.find({
+        userId,
+        $or: [
+          { title: { $regex: query, $options: 'i' } },
+          { content: { $regex: query, $options: 'i' } },
+        ],
+      })
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .lean();
+
+      return {
+        ok: true,
+        items: results.map((it) => ({
+          id: it._id.toString(),
+          type: it.type,
+          title: it.title,
+          status: it.status,
+          startTime: it.startTime,
+        })),
+        count: results.length,
+      };
+    }
+
     default:
       return { ok: false, error: `Unknown tool: ${name}` };
   }
 }
 
 // ---------------------------------------------------------------------------
-// Main entry point — one conversational turn
+// Helper: Trim history to prevent context bloat
 // ---------------------------------------------------------------------------
-export async function runAssistantTurn({ message, history = [], userId, timezone = 'Asia/Karachi' }) {
+function trimHistory(messages, maxLength = 300) {
+  return messages.map((m) => {
+    if (m.role === 'tool' && m.content && typeof m.content === 'string' && m.content.length > maxLength) {
+      return { ...m, content: m.content.slice(0, maxLength) + '...(truncated)' };
+    }
+    return m;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point with ALL FIXES
+// ---------------------------------------------------------------------------
+export async function runAssistantTurn({ message, history = [], userId, timezone = 'Asia/Karachi', activeItem = null }) {
   const nowLocal = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd HH:mm');
 
-  const systemPrompt = `You are the SayNotes assistant. You help the user create and manage notes, tasks, events, and reminders through natural conversation — like a friendly support widget, not a rigid form.
+  // ✅ ENHANCED SYSTEM PROMPT
+  let systemPrompt = `You are the SayNotes assistant. You help the user create and manage notes, tasks, events, and reminders through natural conversation — like a friendly support widget, not a rigid form.
 
 Current date/time for the user (${timezone}): ${nowLocal}.
 
 Guidelines:
 - If the user's request is missing key info (e.g. a reminder with no time), ask a short clarifying question instead of guessing.
-- Once you have enough info, call the appropriate tool to actually create/update/delete the item.
+- Once you have enough info, call the appropriate tool to actually create/update/delete/snooze/search the item.
 - After a tool runs, confirm briefly and naturally in plain language (e.g. "Done — reminder set for tomorrow 9am").
 - Keep replies short and conversational, not robotic.
 - Never call deleteItem without clear confirmation from the user in this conversation.
+- For snooze requests, use snoozeItem with either minutes or until.
+- For search requests, use searchItems.
+- When calling functions, numeric parameters like "limit" must be actual JSON numbers, never quoted strings (correct: {"limit": 10}, wrong: {"limit": "10"}).
+- When the user asks about "today", "upcoming", or "overdue" items, always pass the matching 'when' parameter to listItems — never try to filter by date yourself from unfiltered results.`;
 
-Current user: ${userId}`;
+  if (activeItem) {
+    systemPrompt += `\n\nThe user is currently looking at this item: ${JSON.stringify(activeItem)}. If they say 'that', 'it', or 'this', they mean this item — use its id for snoozeItem/updateItem/deleteItem calls.`;
+  }
+
+  systemPrompt += `\n\nCurrent user: ${userId}`;
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -250,35 +403,70 @@ Current user: ${userId}`;
     { role: 'user', content: message },
   ];
 
-  // Allow a couple of tool-call round trips (model may chain calls)
   for (let turn = 0; turn < 4; turn++) {
-    const completion = await groq.chat.completions.create({
-      model: ASSISTANT_MODEL,
-      messages,
-      tools,
-      tool_choice: 'auto',
-      temperature: 0.4,
-    });
+    let completion;
+    
+    try {
+      completion = await groq.chat.completions.create({
+        model: ASSISTANT_MODEL,
+        messages,
+        tools,
+        tool_choice: 'auto',
+        temperature: 0.4,
+      });
+    } catch (err) {
+      console.warn('⚠️ Groq call failed, retrying once:', err.message);
+      
+      const isToolError = err.message?.includes('tool_use_failed') || 
+                          err.message?.includes('invalid') ||
+                          err.message?.includes('parse');
+      
+      if (isToolError) {
+        console.warn('🔄 Tool use failed — retrying with lower temperature for cleaner output');
+        try {
+          completion = await groq.chat.completions.create({
+            model: ASSISTANT_MODEL,
+            messages,
+            tools,
+            tool_choice: 'auto',
+            temperature: 0.1,
+          });
+        } catch (retryErr) {
+          console.error('❌ Retry also failed:', retryErr.message);
+          const trimmed = trimHistory(messages.slice(1));
+          return {
+            reply: "Sorry, I had trouble understanding that — could you try rephrasing?",
+            history: trimmed,
+          };
+        }
+      } else {
+        throw err;
+      }
+    }
 
     const responseMessage = completion.choices[0].message;
     messages.push(responseMessage);
 
     const toolCalls = responseMessage.tool_calls;
     if (!toolCalls || toolCalls.length === 0) {
-      // Final conversational reply
+      const trimmed = trimHistory(messages.slice(1));
       return {
         reply: responseMessage.content || 'I understood your request. How can I help further?',
-        history: messages.slice(1), // drop system prompt before returning to client
+        history: trimmed,
       };
     }
 
-    // Execute each requested tool call and feed results back to the model
     for (const call of toolCalls) {
       let args = {};
       try {
         args = JSON.parse(call.function.arguments || '{}');
       } catch (e) {
         console.warn('⚠️ assistant tool arg parse failed:', e.message);
+      }
+
+      if (!args || typeof args !== 'object') {
+        console.warn('⚠️ assistant received invalid args (null/primitive), using empty object');
+        args = {};
       }
 
       const result = await executeTool(call.function.name, args, { userId, timezone });
@@ -291,10 +479,9 @@ Current user: ${userId}`;
     }
   }
 
-  // Safety net if the model loops without settling
+  const trimmed = trimHistory(messages.slice(1));
   return {
     reply: "Sorry, I got a bit stuck on that one — could you rephrase what you'd like me to do?",
-    history: messages.slice(1),
+    history: trimmed,
   };
 }
-

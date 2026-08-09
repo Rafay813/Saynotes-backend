@@ -1,5 +1,5 @@
 import express from 'express';
-import { chatWithAssistant } from '../controllers/assistantController.js';
+import { chatWithAssistant, getDailyBriefing } from '../controllers/assistantController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
@@ -9,24 +9,14 @@ router.use(protect);
 
 /**
  * POST /api/v1/assistant/chat
- * Conversational endpoint — send a message (typed or transcribed voice),
- * get back a reply plus updated conversation history.
- * 
- * Request body:
- * {
- *   message: string,
- *   history?: Array<{ role: 'user' | 'assistant', content: string }>,
- *   timezone?: string
- * }
- * 
- * Response:
- * {
- *   success: boolean,
- *   reply: string,
- *   history: Array<{ role: 'user' | 'assistant', content: string }>
- * }
+ * Conversational endpoint — send a message, get back a reply plus updated conversation history.
  */
 router.post('/chat', chatWithAssistant);
 
-export default router;
+/**
+ * GET /api/v1/assistant/briefing
+ * Get today's items grouped by type (instant, no LLM call)
+ */
+router.get('/briefing', getDailyBriefing);
 
+export default router;

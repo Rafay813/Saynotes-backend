@@ -122,15 +122,26 @@ export const connectGoogleCalendar = async (req, res) => {
   }
 };
 
-// Register Push Token
+// ✅ Register Push Token - Fixed to accept both 'expoPushToken' and 'token'
 export const registerPushToken = async (req, res) => {
   try {
-    const { expoPushToken } = req.body;
+    // ✅ Accept both field names for compatibility
+    const expoPushToken = req.body.expoPushToken || req.body.token;
+    const platform = req.body.platform || req.body.pushPlatform || 'unknown';
     
     if (!expoPushToken) {
       return res.status(400).json({
         success: false,
         message: 'expoPushToken is required',
+        errorCode: 'MISSING_TOKEN',
+      });
+    }
+
+    if (typeof expoPushToken !== 'string' || expoPushToken.length < 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid push token format',
+        errorCode: 'INVALID_TOKEN',
       });
     }
 
@@ -138,21 +149,36 @@ export const registerPushToken = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
       });
     }
 
-    await User.findByIdAndUpdate(req.user._id, { expoPushToken });
-    console.log('Push token registered for user:', req.user._id);
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        expoPushToken: expoPushToken,
+        pushPlatform: platform,
+        pushTokenUpdatedAt: new Date(),
+      },
+      { new: true }
+    );
 
+    console.log(`✅ Push token saved for user ${user._id} (${user.email})`);
+    
     res.json({
       success: true,
-      message: 'Push token registered successfully',
+      message: 'Push token saved successfully',
+      data: {
+        platform: user.pushPlatform || platform,
+        updatedAt: user.pushTokenUpdatedAt,
+      },
     });
   } catch (error) {
-    console.error('Push token error:', error);
+    console.error('❌ Failed to save push token:', error);
     res.status(500).json({
       success: false,
-      message: 'Server Error',
+      message: 'Failed to save push token',
+      errorCode: 'INTERNAL_ERROR',
     });
   }
 };
