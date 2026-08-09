@@ -1,4 +1,5 @@
-import Item from '../models/Item.js';
+// controllers/itemController.js
+import Item, { serializeItem, computeIsSnoozed } from '../models/Item.js';
 import { syncWithGoogleCalendar } from '../services/calendarService.js';
 import { sendReminderEmail } from '../services/emailService.js';
 import { invalidateDashboardCache } from './dashboardController.js';
@@ -44,7 +45,7 @@ function buildBaseQuery(req) {
 }
 
 /**
- * ✅ FIXED: Build Today filter based on calendar day, not current time
+ * Build Today filter based on calendar day, not current time
  */
 function buildTodayFilter(req, conditions) {
   const timezone = req.query.timezone || 'UTC';
@@ -63,7 +64,7 @@ function buildTodayFilter(req, conditions) {
 }
 
 /**
- * ✅ FIXED: Build Upcoming filter - items after today
+ * Build Upcoming filter - items after today
  */
 function buildUpcomingFilter(req, conditions) {
   const timezone = req.query.timezone || 'UTC';
@@ -152,17 +153,20 @@ export const getItems = async (req, res) => {
         .skip(skip)
         .limit(limit)
         .lean()
-        .select('title type status startTime endTime createdAt isClientBooking clientName subtasks'),
+        .select('title type status startTime endTime createdAt isClientBooking clientName subtasks isSnoozed snoozedFrom snoozedUntil snoozedCount'),
       Item.countDocuments(query),
     ]);
 
+    // ✅ Serialize items with computed isSnoozed from snoozedUntil
+    const serializedItems = items.map(item => serializeItem(item));
+
     if (process.env.NODE_ENV === 'development') {
-      console.log('📥 Items found:', items.length);
+      console.log('📥 Items found:', serializedItems.length);
     }
 
     return res.status(200).json({
       success: true,
-      items,
+      items: serializedItems,
       pagination: {
         page,
         limit,
@@ -207,7 +211,10 @@ export const getItem = async (req, res) => {
       });
     }
 
-    return res.status(200).json({ success: true, item });
+    // ✅ Serialize with computed isSnoozed
+    const serializedItem = serializeItem(item);
+
+    return res.status(200).json({ success: true, item: serializedItem });
   } catch (error) {
     console.error('❌ Get item error:', error);
     return res.status(500).json({
@@ -281,7 +288,10 @@ export const createItem = async (req, res) => {
 
     invalidateDashboardCache(req.user._id);
 
-    return res.status(201).json({ success: true, item: savedItem });
+    // ✅ Serialize response
+    const serializedItem = serializeItem(savedItem);
+
+    return res.status(201).json({ success: true, item: serializedItem });
   } catch (error) {
     console.error('❌ Create item error:', error);
     return res.status(500).json({
@@ -293,7 +303,7 @@ export const createItem = async (req, res) => {
 };
 
 /**
- * @desc    Update item (only if not expired)
+ * @desc    Update item (only if not expired) - WITH SNOOZE CLEAR
  * @route   PATCH /api/v1/items/:id
  */
 export const updateItem = async (req, res) => {
@@ -354,6 +364,14 @@ export const updateItem = async (req, res) => {
       }
     });
 
+    // ✅ If manually editing time, clear snooze status
+    if (updates.startTime !== undefined) {
+      item.isSnoozed = false;
+      item.snoozedFrom = null;
+      item.snoozedUntil = null;
+      item.snoozedCount = 0;
+    }
+
     if (wasClientBookingEnabled && item.type === 'Event') {
       item.videoCallLink = `https://meet.jit.si/SayNote-${item._id}`;
     }
@@ -364,6 +382,9 @@ export const updateItem = async (req, res) => {
 
     if (previousStatus !== 'completed' && item.status === 'completed') {
       item.completedAt = new Date();
+      // ✅ Clear snooze when completed
+      item.isSnoozed = false;
+      item.snoozedUntil = null;
     }
 
     if (previousStatus === 'completed' && item.status === 'active') {
@@ -374,7 +395,10 @@ export const updateItem = async (req, res) => {
 
     invalidateDashboardCache(req.user._id);
 
-    res.status(200).json({ success: true, item: updatedItem });
+    // ✅ Serialize response
+    const serializedItem = serializeItem(updatedItem);
+
+    res.status(200).json({ success: true, item: serializedItem });
 
     if (updatedItem.type === 'Event' && updatedItem.status === 'active') {
       setImmediate(async () => {
@@ -489,6 +513,11 @@ export const updateItemStatus = async (req, res) => {
     if (reschedule && new_startTime) {
       item.startTime = new Date(new_startTime);
       item.status = 'active';
+      // ✅ Clear snooze when rescheduling
+      item.isSnoozed = false;
+      item.snoozedFrom = null;
+      item.snoozedUntil = null;
+      item.snoozedCount = 0;
     } else if (status) {
       if (!['pending_confirmation', 'active', 'completed', 'cancelled'].includes(status)) {
         return res.status(400).json({
@@ -503,6 +532,8 @@ export const updateItemStatus = async (req, res) => {
       
       if (previousStatus !== 'completed' && item.status === 'completed') {
         item.completedAt = new Date();
+        item.isSnoozed = false;
+        item.snoozedUntil = null;
       } else if (previousStatus === 'completed' && item.status === 'active') {
         item.completedAt = null;
       }
@@ -512,7 +543,10 @@ export const updateItemStatus = async (req, res) => {
 
     invalidateDashboardCache(req.user._id);
 
-    return res.status(200).json({ success: true, item: updatedItem });
+    // ✅ Serialize response
+    const serializedItem = serializeItem(updatedItem);
+
+    return res.status(200).json({ success: true, item: serializedItem });
   } catch (error) {
     console.error('❌ Update status error:', error);
     return res.status(500).json({
@@ -572,10 +606,13 @@ export const confirmItem = async (req, res) => {
 
       invalidateDashboardCache(req.user._id);
 
+      // ✅ Serialize response
+      const serializedItem = serializeItem(updatedItem);
+
       return res.status(200).json({
         success: true,
         message: 'Item cancelled',
-        item: updatedItem,
+        item: serializedItem,
       });
     }
 
@@ -619,7 +656,10 @@ export const confirmItem = async (req, res) => {
 
       invalidateDashboardCache(req.user._id);
 
-      res.status(200).json({ success: true, item: updatedItem });
+      // ✅ Serialize response
+      const serializedItem = serializeItem(updatedItem);
+
+      res.status(200).json({ success: true, item: serializedItem });
 
       if (updatedItem.type === 'Event') {
         setImmediate(async () => {
@@ -746,7 +786,10 @@ export const getExpiredItems = async (req, res) => {
       deletedAt: { $ne: null },
     }).sort({ deletedAt: -1 }).lean();
 
-    return res.status(200).json({ success: true, items });
+    // ✅ Serialize items with computed isSnoozed
+    const serializedItems = items.map(item => serializeItem(item));
+
+    return res.status(200).json({ success: true, items: serializedItems });
   } catch (error) {
     console.error('❌ Get expired items error:', error);
     return res.status(500).json({
@@ -807,6 +850,8 @@ export const toggleSubtask = async (req, res) => {
     if (allDone && item.status !== 'completed') {
       item.status = 'completed';
       item.completedAt = new Date();
+      item.isSnoozed = false;
+      item.snoozedUntil = null;
       console.log('✅ All subtasks done - auto-completing task');
     } else if (!allDone && item.status === 'completed') {
       item.status = 'active';
@@ -818,7 +863,10 @@ export const toggleSubtask = async (req, res) => {
 
     invalidateDashboardCache(req.user._id);
 
-    return res.status(200).json({ success: true, item: updated });
+    // ✅ Serialize response
+    const serializedItem = serializeItem(updated);
+
+    return res.status(200).json({ success: true, item: serializedItem });
   } catch (error) {
     console.error('❌ Toggle subtask error:', error);
     return res.status(500).json({
@@ -863,20 +911,23 @@ export const getOverdueItems = async (req, res) => {
       startTime: { $lt: now },
       ...notExpiredClause,
     })
-      .select('title type startTime priority createdAt')
+      .select('title type startTime priority createdAt isSnoozed snoozedCount snoozedUntil')
       .sort({ startTime: 1 })
       .lean();
 
+    // ✅ Serialize items with computed isSnoozed
+    const serializedItems = overdueItems.map(item => serializeItem(item));
+
     const grouped = {
-      Task: overdueItems.filter(i => i.type === 'Task'),
-      Event: overdueItems.filter(i => i.type === 'Event'),
-      Reminder: overdueItems.filter(i => i.type === 'Reminder'),
+      Task: serializedItems.filter(i => i.type === 'Task'),
+      Event: serializedItems.filter(i => i.type === 'Event'),
+      Reminder: serializedItems.filter(i => i.type === 'Reminder'),
     };
 
     return res.status(200).json({
       success: true,
-      items: overdueItems,
-      count: overdueItems.length,
+      items: serializedItems,
+      count: serializedItems.length,
       grouped: grouped,
     });
   } catch (error) {
@@ -919,14 +970,19 @@ export const completeOverdueItem = async (req, res) => {
 
     item.status = 'completed';
     item.completedAt = new Date();
+    item.isSnoozed = false;
+    item.snoozedUntil = null;
     await item.save();
 
     invalidateDashboardCache(req.user._id);
 
+    // ✅ Serialize response
+    const serializedItem = serializeItem(item);
+
     return res.status(200).json({
       success: true,
       message: 'Item completed successfully',
-      item,
+      item: serializedItem,
     });
   } catch (error) {
     console.error('❌ Complete overdue item error:', error);
@@ -978,14 +1034,22 @@ export const rescheduleOverdueItem = async (req, res) => {
 
     item.startTime = new Date(startTime);
     item.status = 'active';
+    // ✅ Clear snooze when rescheduling
+    item.isSnoozed = false;
+    item.snoozedFrom = null;
+    item.snoozedUntil = null;
+    item.snoozedCount = 0;
     await item.save();
 
     invalidateDashboardCache(req.user._id);
 
+    // ✅ Serialize response
+    const serializedItem = serializeItem(item);
+
     return res.status(200).json({
       success: true,
       message: 'Item rescheduled successfully',
-      item,
+      item: serializedItem,
     });
   } catch (error) {
     console.error('❌ Reschedule overdue item error:', error);
@@ -998,11 +1062,11 @@ export const rescheduleOverdueItem = async (req, res) => {
 };
 
 // ============================================================
-// ✅ SNOWZE ITEM - NEW
+// ✅ SNOOZE ITEM - Updated with snoozedUntil (doesn't touch startTime)
 // ============================================================
 
 /**
- * @desc    Snooze an item by minutes
+ * @desc    Snooze an item by minutes (uses snoozedUntil, doesn't touch startTime)
  * @route   POST /api/v1/items/:id/snooze
  * @access  Private
  */
@@ -1039,19 +1103,24 @@ export const snoozeItem = async (req, res) => {
     }
 
     const snoozeMinutes = minutes || 5;
-    item.startTime = new Date(Date.now() + snoozeMinutes * 60 * 1000);
+    const now = new Date();
+    
+    // ✅ Set snooze fields - startTime stays the same!
+    item.snoozedUntil = new Date(now.getTime() + snoozeMinutes * 60 * 1000);
+    item.isSnoozed = true;
+    item.snoozedFrom = item.startTime || now;
+    item.snoozedCount = (item.snoozedCount || 0) + 1;
     item.status = 'active';
+    
     await item.save();
-
     invalidateDashboardCache(req.user._id);
+
+    // ✅ Serialize response with computed isSnoozed
+    const serializedItem = serializeItem(item);
 
     res.status(200).json({ 
       success: true, 
-      item: {
-        id: item._id.toString(),
-        title: item.title,
-        startTime: item.startTime,
-      },
+      item: serializedItem,
       message: `Snoozed for ${snoozeMinutes} minutes`
     });
   } catch (error) {
@@ -1059,6 +1128,61 @@ export const snoozeItem = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Failed to snooze item',
+      errorCode: 'INTERNAL_ERROR',
+    });
+  }
+};
+
+/**
+ * @desc    Clear snooze on an item (manual unsnooze)
+ * @route   POST /api/v1/items/:id/unsnooze
+ * @access  Private
+ */
+export const unsnoozeItem = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        errorCode: 'UNAUTHORIZED',
+      });
+    }
+
+    const item = await Item.findOne({ 
+      _id: req.params.id, 
+      userId: req.user._id 
+    });
+    
+    if (!item) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Item not found',
+        errorCode: 'NOT_FOUND',
+      });
+    }
+
+    // ✅ Clear all snooze fields
+    item.isSnoozed = false;
+    item.snoozedFrom = null;
+    item.snoozedUntil = null;
+    item.snoozedCount = 0;
+    
+    await item.save();
+    invalidateDashboardCache(req.user._id);
+
+    // ✅ Serialize response
+    const serializedItem = serializeItem(item);
+
+    res.status(200).json({ 
+      success: true, 
+      item: serializedItem,
+      message: 'Snooze cleared'
+    });
+  } catch (error) {
+    console.error('❌ Unsnooze error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to unsnooze item',
       errorCode: 'INTERNAL_ERROR',
     });
   }
@@ -1078,5 +1202,6 @@ export default {
   getOverdueItems,
   completeOverdueItem,
   rescheduleOverdueItem,
-  snoozeItem, // ✅ NEW
+  snoozeItem,
+  unsnoozeItem,
 };

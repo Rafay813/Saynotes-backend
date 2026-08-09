@@ -21,7 +21,7 @@ function getDayBoundaries(timezone) {
 const dashboardCache = new Map();
 const summaryCache = new Map();
 const CACHE_TTL_MS = 30 * 1000;
-const SUMMARY_TTL_MS = 5 * 60 * 1000; // 5 minutes for AI summary
+const SUMMARY_TTL_MS = 5 * 60 * 1000;
 
 // ✅ Export cache for invalidation from other controllers
 export const invalidateDashboardCache = (userId) => {
@@ -30,7 +30,6 @@ export const invalidateDashboardCache = (userId) => {
   const userIdStr = userId.toString ? userId.toString() : String(userId);
   let invalidated = 0;
   
-  // Invalidate all timezone variants for this user
   for (const key of dashboardCache.keys()) {
     if (key.startsWith(`${userIdStr}:`)) {
       dashboardCache.delete(key);
@@ -38,7 +37,6 @@ export const invalidateDashboardCache = (userId) => {
     }
   }
   
-  // Also invalidate summary cache
   for (const key of summaryCache.keys()) {
     if (key.startsWith(`${userIdStr}:`)) {
       summaryCache.delete(key);
@@ -126,7 +124,8 @@ export const getDashboard = async (req, res) => {
     };
 
     const activeFilter = { userId, status: 'active', ...notExpiredClause };
-    const LIST_FIELDS = 'title type status startTime endTime isClientBooking clientName subtasks createdAt';
+    // ✅ Include snooze fields in selection
+    const LIST_FIELDS = 'title type status startTime endTime isClientBooking clientName subtasks createdAt isSnoozed snoozedFrom snoozedCount';
 
     const [
       todayItems,
@@ -160,13 +159,13 @@ export const getDashboard = async (req, res) => {
       }).select(LIST_FIELDS).sort({ startTime: 1 }).limit(20).lean(),
 
       Item.find({ userId, status: 'completed', ...notExpiredClause })
-        .select('title type completedAt')
+        .select('title type completedAt isSnoozed')
         .sort({ completedAt: -1 })
         .limit(5)
         .lean(),
     ]);
 
-    // ✅ FIND OVERDUE ITEMS - ALL TYPES (Task, Event, Reminder)
+    // ✅ FIND OVERDUE ITEMS - ALL TYPES
     const nowUTC = new Date();
     const overdueItems = await Item.find({
       userId,
@@ -174,7 +173,7 @@ export const getDashboard = async (req, res) => {
       startTime: { $lt: nowUTC },
       ...notExpiredClause,
     })
-      .select('title type startTime priority createdAt')
+      .select('title type startTime priority createdAt isSnoozed')
       .sort({ startTime: 1 })
       .lean();
 

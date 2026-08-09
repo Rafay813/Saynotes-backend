@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
-import Item from '../models/Item.js';
-import User from '../models/User.js'; // ✅ Fixed: User imported
+import Item, { computeIsSnoozed } from '../models/Item.js';
+import User from '../models/User.js';
 import { invalidateDashboardCache } from './dashboardController.js';
 import { sendPushNotification } from '../services/pushNotificationService.js';
 import { generateReminderAudio, formatReminderText } from '../services/voiceReminderService.js';
@@ -14,7 +14,7 @@ export const getReminders = async (req, res) => {
     
     const query = {
       userId: req.user._id,
-      type: { $in: ['Reminder', 'Event'] }, // Both types are "reminder-like"
+      type: { $in: ['Reminder', 'Event'] },
     };
     
     if (status) query.status = status;
@@ -44,6 +44,10 @@ export const getReminders = async (req, res) => {
         priority: r.priority,
         category: r.category,
         createdAt: r.createdAt,
+        isSnoozed: computeIsSnoozed(r),
+        snoozedCount: r.snoozedCount || 0,
+        snoozedFrom: r.snoozedFrom || null,
+        snoozedUntil: r.snoozedUntil || null,
         formattedText: formatReminderText(r),
       })),
       pagination: {
@@ -85,6 +89,9 @@ export const getUpcomingReminders = async (req, res) => {
         title: r.title,
         content: r.content,
         startTime: r.startTime,
+        isSnoozed: computeIsSnoozed(r),
+        snoozedCount: r.snoozedCount || 0,
+        snoozedUntil: r.snoozedUntil || null,
         formattedText: formatReminderText(r),
       })),
     });
@@ -95,7 +102,7 @@ export const getUpcomingReminders = async (req, res) => {
 };
 
 /**
- * Snooze a reminder (Item)
+ * ✅ UPDATED: Snooze a reminder with snoozedUntil (doesn't touch startTime)
  */
 export const snoozeReminder = async (req, res) => {
   try {
@@ -109,23 +116,28 @@ export const snoozeReminder = async (req, res) => {
     }
 
     const now = DateTime.now().setZone(timezone);
-    let newStartTime = null;
+    let snoozeUntilDate = null;
 
     if (minutes) {
-      newStartTime = now.plus({ minutes }).toJSDate();
+      snoozeUntilDate = now.plus({ minutes }).toJSDate();
     } else if (until) {
       const parsed = DateTime.fromISO(until).setZone(timezone);
       if (parsed.isValid) {
-        newStartTime = parsed.toJSDate();
+        snoozeUntilDate = parsed.toJSDate();
       } else {
         return res.status(400).json({ success: false, error: 'Invalid date format for "until"' });
       }
     } else {
-      newStartTime = now.plus({ minutes: 5 }).toJSDate();
+      snoozeUntilDate = now.plus({ minutes: 5 }).toJSDate();
     }
 
-    item.startTime = newStartTime;
+    // ✅ startTime stays untouched — snooze only affects snoozedUntil
+    item.snoozedUntil = snoozeUntilDate;
     item.status = 'active';
+    item.isSnoozed = true;
+    item.snoozedFrom = item.startTime || now.toJSDate();
+    item.snoozedCount = (item.snoozedCount || 0) + 1;
+    
     await item.save();
     invalidateDashboardCache(req.user._id);
 
@@ -135,8 +147,12 @@ export const snoozeReminder = async (req, res) => {
         id: item._id,
         title: item.title,
         startTime: item.startTime,
+        isSnoozed: computeIsSnoozed(item),
+        snoozedFrom: item.snoozedFrom,
+        snoozedUntil: item.snoozedUntil,
+        snoozedCount: item.snoozedCount,
       },
-      message: `Snoozed until ${DateTime.fromJSDate(newStartTime).setZone(timezone).toFormat('yyyy-MM-dd HH:mm')}`,
+      message: `Snoozed until ${DateTime.fromJSDate(snoozeUntilDate).setZone(timezone).toFormat('yyyy-MM-dd HH:mm')}`,
     });
   } catch (error) {
     console.error('❌ Failed to snooze:', error);
@@ -158,6 +174,8 @@ export const completeReminder = async (req, res) => {
 
     item.status = 'completed';
     item.completedAt = new Date().toISOString();
+    item.isSnoozed = false;
+    item.snoozedUntil = null;
     await item.save();
     invalidateDashboardCache(req.user._id);
 
@@ -167,6 +185,7 @@ export const completeReminder = async (req, res) => {
         id: item._id,
         title: item.title,
         status: item.status,
+        isSnoozed: false,
       },
       message: `✅ Completed: ${item.title}`,
     });
@@ -209,6 +228,8 @@ export const getCheckInTasks = async (req, res) => {
         title: t.title,
         content: t.content,
         startTime: t.startTime,
+        isSnoozed: computeIsSnoozed(t),
+        snoozedCount: t.snoozedCount || 0,
         formattedText: `Did you complete "${t.title}"?`,
       })),
     });
@@ -223,7 +244,7 @@ export const getCheckInTasks = async (req, res) => {
  */
 export const respondToCheckIn = async (req, res) => {
   try {
-    const { response } = req.body; // 'done', 'working_on_it', 'snooze', 'reschedule'
+    const { response } = req.body;
     const { timezone = 'Asia/Karachi' } = req.query;
     const itemId = req.params.id;
 
@@ -239,6 +260,8 @@ export const respondToCheckIn = async (req, res) => {
       case 'done':
         item.status = 'completed';
         item.completedAt = new Date().toISOString();
+        item.isSnoozed = false;
+        item.snoozedUntil = null;
         await item.save();
         invalidateDashboardCache(req.user._id);
         result = { item, message: `✅ Completed: ${item.title}` };
@@ -249,8 +272,12 @@ export const respondToCheckIn = async (req, res) => {
         break;
 
       case 'snooze':
-        item.startTime = now.plus({ minutes: 15 }).toJSDate();
+        // ✅ Use snoozedUntil, don't touch startTime
+        item.snoozedUntil = now.plus({ minutes: 15 }).toJSDate();
         item.status = 'active';
+        item.isSnoozed = true;
+        item.snoozedFrom = item.startTime || now.toJSDate();
+        item.snoozedCount = (item.snoozedCount || 0) + 1;
         await item.save();
         invalidateDashboardCache(req.user._id);
         result = { 
@@ -265,6 +292,10 @@ export const respondToCheckIn = async (req, res) => {
           const newStart = DateTime.fromISO(`${newDate}T${newTime}`).setZone(timezone);
           if (newStart.isValid) {
             item.startTime = newStart.toJSDate();
+            item.isSnoozed = false;
+            item.snoozedFrom = null;
+            item.snoozedUntil = null;
+            item.snoozedCount = 0;
             await item.save();
             invalidateDashboardCache(req.user._id);
             result = { 
@@ -309,7 +340,6 @@ export const hearNow = async (req, res) => {
     const audio = await generateReminderAudio(text);
 
     if (!audio) {
-      // Fallback: return the text so client can use device TTS
       return res.json({
         success: true,
         audioUrl: null,

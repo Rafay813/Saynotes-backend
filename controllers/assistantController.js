@@ -34,6 +34,7 @@ export const chatWithAssistant = async (req, res) => {
       });
     }
 
+    // Limit history to prevent token overflow
     const safeHistory = Array.isArray(history) ? history.slice(-15) : [];
 
     const result = await runAssistantTurn({

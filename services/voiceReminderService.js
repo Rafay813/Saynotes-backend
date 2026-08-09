@@ -15,7 +15,6 @@ let ttsClient = null;
 let isTTSAvailable = false;
 
 try {
-  // Try to dynamically import Google TTS
   const { TextToSpeechClient } = await import('@google-cloud/text-to-speech');
   
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -40,7 +39,6 @@ if (!fs.existsSync(AUDIO_CACHE_DIR)) {
  * Generate TTS audio for a reminder (with graceful fallback)
  */
 export async function generateReminderAudio(text, voice = 'en-US-Neural2-F') {
-  // If Google TTS is not available, return null (client will use device TTS)
   if (!isTTSAvailable || !ttsClient) {
     console.log('⚠️ TTS not available, client will use device fallback');
     return null;
@@ -64,7 +62,6 @@ export async function generateReminderAudio(text, voice = 'en-US-Neural2-F') {
     const [response] = await ttsClient.synthesizeSpeech(request);
     const audioContent = response.audioContent;
 
-    // Cache the audio
     const hash = Buffer.from(text).toString('base64').substring(0, 20);
     const filename = `${hash}-${Date.now()}.mp3`;
     const filepath = path.join(AUDIO_CACHE_DIR, filename);
@@ -104,7 +101,7 @@ export function formatReminderText(item) {
 }
 
 /**
- * Snooze an item
+ * ✅ UPDATED: Snooze an item with snooze fields
  */
 export async function snoozeItem(itemId, userId, minutes = null, until = null, timezone = 'Asia/Karachi') {
   const item = await Item.findOne({ _id: itemId, userId });
@@ -125,12 +122,17 @@ export async function snoozeItem(itemId, userId, minutes = null, until = null, t
       throw new Error('Invalid date format for "until"');
     }
   } else {
-    // Default: snooze for 5 minutes
     newStartTime = now.plus({ minutes: 5 }).toJSDate();
   }
 
+  const originalStartTime = item.startTime;
+
   item.startTime = newStartTime;
   item.status = 'active';
+  item.isSnoozed = true;
+  item.snoozedFrom = originalStartTime || now.toJSDate();
+  item.snoozedCount = (item.snoozedCount || 0) + 1;
+  
   await item.save();
   invalidateDashboardCache(userId);
 
@@ -152,6 +154,7 @@ export async function completeItem(itemId, userId) {
 
   item.status = 'completed';
   item.completedAt = new Date().toISOString();
+  item.isSnoozed = false;
   await item.save();
   invalidateDashboardCache(userId);
 
@@ -169,7 +172,6 @@ export async function getPendingTasksForCheckIn(userId, timezone = 'Asia/Karachi
   const today = now.startOf('day');
   const tomorrow = today.plus({ days: 1 });
 
-  // Get tasks that were scheduled for today and are still active
   const tasks = await Item.find({
     userId,
     type: 'Task',
@@ -193,7 +195,6 @@ export function shouldCheckIn(item, timezone = 'Asia/Karachi') {
   const scheduled = DateTime.fromISO(item.startTime).setZone(timezone);
   const timePassed = now.diff(scheduled, 'minutes').minutes;
   
-  // Check-in 15-30 minutes after scheduled time
   return timePassed >= 15 && timePassed <= 45;
 }
 

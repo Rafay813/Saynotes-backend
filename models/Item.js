@@ -1,3 +1,4 @@
+// models/Item.js
 import mongoose from 'mongoose';
 
 const itemSchema = new mongoose.Schema({
@@ -104,9 +105,40 @@ const itemSchema = new mongoose.Schema({
     text: { type: String, required: true },
     done: { type: Boolean, default: false },
   }],
+  // ✅ SNOOZE FIELDS - Updated with snoozedUntil
+  isSnoozed: {
+    type: Boolean,
+    default: false,
+  },
+  snoozedFrom: {
+    type: Date,
+    default: null,
+  },
+  snoozedUntil: {
+    type: Date,
+    default: null,
+  },
+  snoozedCount: {
+    type: Number,
+    default: 0,
+  },
 }, {
   timestamps: true,
 });
+
+// ✅ Helper: Compute isSnoozed from snoozedUntil
+export function computeIsSnoozed(item) {
+  if (!item.snoozedUntil) return false;
+  const now = new Date();
+  return new Date(item.snoozedUntil) > now;
+}
+
+// ✅ Helper: Serialize item with computed isSnoozed
+export function serializeItem(item) {
+  const obj = item.toObject ? item.toObject() : item;
+  obj.isSnoozed = computeIsSnoozed(obj);
+  return obj;
+}
 
 // Helper function - computes deleteAfter based on item type and dates
 export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
@@ -156,7 +188,7 @@ export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
   return d;
 }
 
-// Pre-save middleware - no 'next' parameter
+// Pre-save middleware - compute deleteAfter
 itemSchema.pre('save', function() {
   if (this.deleteAfter === undefined || this.deleteAfter === null) {
     this.deleteAfter = computeDeleteAfter({
@@ -168,14 +200,15 @@ itemSchema.pre('save', function() {
   }
 });
 
-// ✅ Indexes for performance - including compound index
+// ✅ Indexes for performance
 itemSchema.index({ userId: 1, type: 1, status: 1 });
 itemSchema.index({ userId: 1, startTime: 1 });
 itemSchema.index({ userId: 1, createdAt: -1 });
 itemSchema.index({ deleteAfter: 1 });
 itemSchema.index({ userId: 1, isLinkedEvent: 1 });
-// ✅ Compound index for dashboard queries
 itemSchema.index({ userId: 1, status: 1, startTime: 1 });
+// ✅ Index for snooze queries
+itemSchema.index({ userId: 1, snoozedUntil: 1 });
 
 // Safe model loading
 const Item = mongoose.models.Item || mongoose.model('Item', itemSchema);
