@@ -1,7 +1,7 @@
 import Groq from 'groq-sdk';
 import { DateTime } from 'luxon';
 import Item from '../models/Item.js';
-import { calculateEndTime } from '../utils/dateUtils.js';
+import { parseDateTime, calculateEndTime } from '../utils/dateUtils.js';
 import { invalidateDashboardCache } from '../controllers/dashboardController.js';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -29,7 +29,7 @@ function getSessionState(userId) {
 }
 
 // ============================================
-// HISTORY CLEANING - CRITICAL FIX
+// HISTORY CLEANING
 // ============================================
 
 function getSafeHistory(history, limit = 6) {
@@ -101,91 +101,7 @@ function containsReference(text) {
 }
 
 // ============================================
-// TIME PARSING - COMPLETE REPLACEMENT
-// ============================================
-
-function safeParseTime(dateStr, timeStr, timezone) {
-  const now = DateTime.now().setZone(timezone);
-
-  const finalDate = dateStr?.trim() || now.toFormat('yyyy-MM-dd');
-
-  if (!timeStr) {
-    return null;
-  }
-
-  let rawTime = String(timeStr)
-    .trim()
-    .toLowerCase()
-    .replace(/\./g, '')
-    .replace(/\s+/g, ' ');
-
-  let parsed = null;
-
-  // AM / PM format - handles "7 p.m.", "7 pm", "7:00 pm", "07 PM"
-  const ampmMatch = rawTime.match(/^(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)$/);
-
-  if (ampmMatch) {
-    const hour = Number(ampmMatch[1]);
-    const minute = Number(ampmMatch[2] || 0);
-    const period = ampmMatch[3];
-
-    if (hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59) {
-      let hour24 = hour;
-
-      if (period === 'am') {
-        if (hour === 12) hour24 = 0;
-      } else {
-        if (hour !== 12) hour24 += 12;
-      }
-
-      const normalizedTime = `${String(hour24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-
-      parsed = DateTime.fromFormat(
-        `${finalDate} ${normalizedTime}`,
-        'yyyy-MM-dd HH:mm',
-        { zone: timezone }
-      );
-    }
-  }
-
-  // 24-hour format
-  if (!parsed || !parsed.isValid) {
-    const twentyFourHourMatch = rawTime.match(/^(\d{1,2}):(\d{2})$/);
-
-    if (twentyFourHourMatch) {
-      const hour = Number(twentyFourHourMatch[1]);
-      const minute = Number(twentyFourHourMatch[2]);
-
-      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
-        const normalizedTime = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-
-        parsed = DateTime.fromFormat(
-          `${finalDate} ${normalizedTime}`,
-          'yyyy-MM-dd HH:mm',
-          { zone: timezone }
-        );
-      }
-    }
-  }
-
-  if (!parsed || !parsed.isValid) {
-    console.warn('⚠️ Could not parse time:', {
-      dateStr,
-      timeStr,
-      normalized: rawTime,
-      timezone,
-    });
-
-    return null; // NEVER fallback to now
-  }
-
-  console.log(`🕐 Parsed ${finalDate} ${timeStr} (${timezone}) → ${parsed.toISO()}`);
-
-  return parsed.toJSDate();
-}
-
-// ============================================
-// VALIDATION
+// VALIDATION - FIXED: time is now optional
 // ============================================
 
 function validateCreateItem(args) {
@@ -210,13 +126,7 @@ function validateCreateItem(args) {
         message: `What date should I set the ${args.type.toLowerCase()} for?`,
       };
     }
-
-    if (!args.time) {
-      return {
-        valid: false,
-        message: `What time should I set the ${args.type.toLowerCase()} for?`,
-      };
-    }
+    // ✅ time is optional now — parseDateTime will default it to "now + 2h" (today) or 9 AM (future date)
   }
 
   return {
@@ -226,7 +136,7 @@ function validateCreateItem(args) {
 }
 
 // ============================================
-// TOOL DEFINITIONS
+// TOOL DEFINITIONS - FIXED: LLM passes raw phrases
 // ============================================
 
 const tools = [
@@ -253,11 +163,11 @@ const tools = [
           },
           date: {
             type: 'string',
-            description: 'Date in YYYY-MM-DD format. If user says today, use the current date provided in the system prompt.',
+            description: 'The date exactly as the user said it — e.g. "today", "tomorrow", "next Friday", "July 20". Do NOT compute or convert it yourself; pass the natural-language phrase through as-is.',
           },
           time: {
             type: 'string',
-            description: 'Time in 24-hour HH:mm format ONLY. Convert AM/PM yourself. Examples: 7 PM = 19:00, 7:30 PM = 19:30, 12 AM = 00:00, 12 PM = 12:00.',
+            description: 'The time exactly as the user said it — e.g. "7 PM", "7:30pm", "19:00". Do NOT convert AM/PM yourself; pass the phrase through as-is.',
           },
           duration: {
             type: 'number',
@@ -313,11 +223,11 @@ const tools = [
           },
           date: {
             type: 'string',
-            description: 'New date in YYYY-MM-DD format',
+            description: 'The date exactly as the user said it — e.g. "today", "tomorrow", "next Friday". Do NOT compute or convert it yourself; pass the natural-language phrase through as-is.',
           },
           time: {
             type: 'string',
-            description: 'New time in 24-hour HH:mm format ONLY. Convert AM/PM yourself.',
+            description: 'The time exactly as the user said it — e.g. "7 PM", "7:30pm". Do NOT convert AM/PM yourself; pass the phrase through as-is.',
           },
           status: {
             type: 'string',
@@ -369,11 +279,11 @@ const tools = [
           },
           date: {
             type: 'string',
-            description: 'New date in YYYY-MM-DD format',
+            description: 'The date exactly as the user said it — e.g. "tomorrow", "next Monday". Do NOT compute or convert it yourself; pass the natural-language phrase through as-is.',
           },
           time: {
             type: 'string',
-            description: 'New time in 24-hour HH:mm format ONLY. Convert AM/PM yourself.',
+            description: 'The time exactly as the user said it — e.g. "9 AM", "2:30pm". Do NOT convert AM/PM yourself; pass the phrase through as-is.',
           },
         },
         required: ['itemId'],
@@ -522,7 +432,7 @@ async function confirmDelete(userId, itemId, timezone) {
 }
 
 // ============================================
-// TOOL EXECUTION
+// TOOL EXECUTION - FIXED: uses shared parseDateTime
 // ============================================
 
 async function executeTool(toolName, args, context) {
@@ -530,6 +440,11 @@ async function executeTool(toolName, args, context) {
 
   switch (toolName) {
     case 'createItem': {
+      // ✅ FIXED: Default missing date to "today", matching voice-button pipeline
+      if (!args.date && (args.type === 'Event' || args.type === 'Reminder')) {
+        args.date = 'today';
+      }
+
       const validation = validateCreateItem(args);
 
       if (!validation.valid) {
@@ -542,13 +457,14 @@ async function executeTool(toolName, args, context) {
       let startTime = null;
       let endTime = null;
 
-      if (args.time || args.date) {
-        startTime = safeParseTime(args.date, args.time, timezone);
+      // ✅ Use shared parseDateTime from dateUtils.js
+      if (args.date) {
+        startTime = parseDateTime(args.date, args.time, timezone);
 
         if (!startTime) {
           return {
             ok: false,
-            error: `I couldn't understand the time "${args.time}". Please provide a time like 7 PM or 19:00.`,
+            error: `I couldn't understand the date/time. Please provide a clear date like "tomorrow" or "next Friday" and time like "7 PM".`,
           };
         }
 
@@ -575,6 +491,7 @@ async function executeTool(toolName, args, context) {
         repeat: args.repeat || 'none',
       };
 
+      // ✅ Handle subtasks if provided
       if (args.type === 'Task' && Array.isArray(args.subtasks) && args.subtasks.length > 0) {
         itemData.subtasks = args.subtasks.map((text) => ({
           text,
@@ -633,14 +550,15 @@ async function executeTool(toolName, args, context) {
       if (args.title) updates.title = args.title.trim();
       if (args.content) updates.content = args.content;
 
-      if (args.date || args.time) {
-        const startTime = safeParseTime(args.date, args.time, timezone);
+      // ✅ Use shared parseDateTime from dateUtils.js
+      if (args.date) {
+        const startTime = parseDateTime(args.date, args.time, timezone);
         if (startTime) {
           updates.startTime = startTime;
         } else {
           return {
             ok: false,
-            error: `I couldn't understand the time "${args.time}". Please provide a time like 7 PM or 19:00.`,
+            error: `I couldn't understand the date/time. Please provide a clear date like "tomorrow" or "next Friday" and time like "7 PM".`,
           };
         }
       }
@@ -725,15 +643,16 @@ async function executeTool(toolName, args, context) {
         return { ok: false, error: 'Unauthorized.' };
       }
 
-      if (!args.date && !args.time) {
-        return { ok: false, error: 'Please provide a new date or time to snooze to.' };
+      if (!args.date) {
+        return { ok: false, error: 'Please provide a new date to snooze to.' };
       }
 
-      const startTime = safeParseTime(args.date, args.time, timezone);
+      // ✅ Use shared parseDateTime from dateUtils.js
+      const startTime = parseDateTime(args.date, args.time, timezone);
       if (!startTime) {
         return {
           ok: false,
-          error: `I couldn't understand the time "${args.time}". Please provide a time like 7 PM or 19:00.`,
+          error: `I couldn't understand the date/time. Please provide a clear date like "tomorrow" or "next Monday".`,
         };
       }
 
@@ -896,7 +815,7 @@ async function executeTool(toolName, args, context) {
 }
 
 // ============================================
-// GROQ CALL WITH RETRIES - IMPROVED ERROR LOGGING
+// GROQ CALL WITH RETRIES
 // ============================================
 
 async function callGroqWithRetries(model, messages, tools, temperature = 0.15, maxRetries = 2) {
@@ -979,7 +898,7 @@ async function callGroqWithRetries(model, messages, tools, temperature = 0.15, m
 }
 
 // ============================================
-// MAIN ASSISTANT TURN - COMPLETE REPLACEMENT
+// MAIN ASSISTANT TURN
 // ============================================
 
 export async function runAssistantTurn({
@@ -1084,7 +1003,7 @@ export async function runAssistantTurn({
     }
 
     // --------------------------------------------------
-    // SYSTEM PROMPT
+    // SYSTEM PROMPT - FIXED: Tell LLM to pass raw date/time
     // --------------------------------------------------
 
     const systemPrompt = `
@@ -1109,20 +1028,14 @@ IMPORTANT RULES:
 
 CREATE:
 - Always use the createItem tool when the user asks to create something.
-- For Event and Reminder, date and time are required.
-- Convert natural language time into 24-hour HH:mm.
-- Example:
-  "7 pm" -> "19:00"
-  "7:30 pm" -> "19:30"
-  "12 am" -> "00:00"
-  "12 pm" -> "12:00"
-- If user says "today", use today's date: ${todayDate}.
-- Never invent a time.
-- Never invent a date when it matters.
+- For Event and Reminder, date is required. Time is optional.
+- Pass date and time through exactly as the user said them (e.g. "next Friday", "7 PM"). The server will resolve them — do NOT compute dates or convert times yourself.
+- If user says "today", pass "today" as the date.
 
 TASK:
 - If user says "task of buying milk and go to market at 7 pm", create a Task.
 - Preserve the user's intended title/content.
+- If the user lists multiple distinct things to do (separated by commas, "and", "then"), put each one as a separate string in the "subtasks" array so they show up as individual checklist items — do not collapse them into one title only. Example: "buy milk, do assignments and go to market" → subtasks: ["Buy milk", "Do assignments", "Go to market"].
 
 UPDATE:
 - Use updateItem.
@@ -1316,7 +1229,7 @@ RESPONSE:
       }
 
       // --------------------------------------------------
-      // SECOND GROQ CALL - CRITICAL FIX
+      // SECOND GROQ CALL
       // Send tool results back to Groq for final response
       // --------------------------------------------------
 

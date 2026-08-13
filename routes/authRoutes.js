@@ -26,12 +26,12 @@ router.post('/reset-password', resetPassword);
 router.get('/me', protect, getMe);
 router.post('/push-token', protect, registerPushToken);
 
-// Get Google Calendar Auth URL
+// ✅ FIXED: Get Google Calendar Auth URL - uses authenticated user directly
 router.get('/google/auth-url', protect, async (req, res) => {
   try {
-    const { userId } = req.query;
-    const userIdToUse = userId || req.user._id;
-    
+    // ✅ Use the authenticated user's ID directly (no query param needed)
+    const userIdToUse = req.user._id.toString();
+
     const url = getGoogleAuthUrl(userIdToUse);
     console.log('Generated Google Auth URL with userId:', userIdToUse);
     res.json({ url });

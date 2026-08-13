@@ -68,6 +68,7 @@ FEW-SHOT EXAMPLES (study these for classification and title patterns):
 Transcript: "remind me to call mom tomorrow at 9am" → {"type": "Reminder", "title": "Call mom at 9 AM tomorrow", "date": "tomorrow", "time": "9 AM", "person": "mom"}
 Transcript: "meeting with Sarah at 3pm about the budget" → {"type": "Event", "title": "Meeting with Sarah about budget at 3 PM", "date": "today", "time": "3 PM", "person": "Sarah"}
 Transcript: "buy milk and eggs" → {"type": "Task", "title": "Buy milk and eggs", "items": ["milk", "eggs"]}
+Transcript: "buy milk, do assignments and go to market" → {"type": "Task", "title": "Buy milk, do assignments and go to market", "subtasks": ["Buy milk", "Do assignments", "Go to market"]}
 Transcript: "idea for the app: add dark mode" → {"type": "Note", "title": "Idea: add dark mode"}
 Transcript: "finish the report by Friday" → {"type": "Task", "title": "Finish the report by Friday", "date": "Friday"}
 Transcript: "urgent, call the client back today" → {"type": "Reminder", "title": "Call client back today", "date": "today", "person": "client"}
@@ -84,6 +85,11 @@ Extract these fields:
 - location: if mentioned (e.g., "Zoom", "Office")
 - items: array of items (for shopping/task lists)
 - subtasks: array of subtasks (for task lists)
+
+SUBTASKS RULE (for Task type):
+- Use "items" ONLY for a literal list of nouns to purchase (e.g., "buy milk and eggs" → items: ["milk", "eggs"]).
+- Use "subtasks" whenever the user lists multiple distinct actions/errands to complete, even if mixed with a shopping item — split on commas, "and", "then", "also". Each subtask should be a short actionable phrase, not a bare noun.
+- Example: "buy milk, do assignments and go to market" is THREE separate actions, not one — extract each into "subtasks", not "items".
 
 IMPORTANT: Only extract time if the user explicitly mentions it. Do NOT add a default time.
 

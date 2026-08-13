@@ -65,8 +65,9 @@ function parseDateString(dateStr, timezone) {
       let targetDay = i;
       let currentDay = now.weekday % 7;
       let diff = targetDay - currentDay;
-      if (diff < 0) diff += 7;
-      const result = now.plus({ days: diff + 7 }).startOf('day');
+      // ✅ FIXED: diff check and removed extra + 7
+      if (diff <= 0) diff += 7;
+      const result = now.plus({ days: diff }).startOf('day');
       console.log(`✅ Parsed as "next ${weekdays[i]}"`);
       return result;
     }
@@ -426,6 +427,15 @@ export function detectClientBooking(text, person) {
   return patterns.some(pattern => pattern.test(text));
 }
 
+// ✅ FIXED: Add helper to apply default time dynamically
+function applyDefaultTime(dt, now) {
+  if (dt.hasSame(now, 'day')) {
+    const soon = now.plus({ hours: 2 });
+    return dt.set({ hour: soon.hour, minute: soon.minute, second: 0 });
+  }
+  return dt.set({ hour: 9, minute: 0, second: 0 });
+}
+
 /**
  * ✅ FIXED: Main function - Parse date and time, return UTC Date
  */
@@ -452,6 +462,7 @@ export function parseDateTime(dateStr, timeStr, timezone) {
   }
 
   // Parse time
+  // ✅ FIXED: Defaulting to applyDefaultTime handling instead of hardcoded 9 AM
   if (timeStr) {
     const time = parseTimeString(timeStr);
     if (time) {
@@ -463,10 +474,11 @@ export function parseDateTime(dateStr, timeStr, timezone) {
       console.log(`⏰ Set time to ${time.hours}:${time.minutes}:${time.seconds || 0}`);
     } else {
       console.warn(`⚠️ Could not parse time: "${timeStr}"`);
+      dt = applyDefaultTime(dt, now);
     }
   } else {
-    console.log('⏰ No time specified, defaulting to 9:00 AM');
-    dt = dt.set({ hour: 9, minute: 0 });
+    console.log('⏰ No time specified, applying default time');
+    dt = applyDefaultTime(dt, now);
   }
 
   // ✅ Check if the time is in the past for TODAY
