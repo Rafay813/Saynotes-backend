@@ -63,6 +63,7 @@ export const syncToGoogle = async (req, res) => {
     if (result.success) {
       if (result.googleEventId) {
         item.googleEventId = result.googleEventId;
+        item.googleHtmlLink = result.htmlLink || null; // ✅ ADDED THIS
         item.isSynced = true;
         await item.save();
       } else if (result.googleTaskId) {
@@ -150,6 +151,7 @@ export const syncAllToGoogle = async (req, res) => {
           });
           if (result.success) {
             item.googleEventId = result.googleEventId;
+            item.googleHtmlLink = result.htmlLink || null; // ✅ ADDED THIS
             item.isSynced = true;
             await item.save();
             results.synced++;

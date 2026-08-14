@@ -55,6 +55,10 @@ const itemSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  googleHtmlLink: {    // ✅ ADDED THIS
+    type: String,
+    default: null,
+  },
   googleTaskId: {
     type: String,
     default: null,
@@ -148,13 +152,7 @@ export function serializeItem(item) {
 export function computeDeleteAfter({ type, startTime, endTime, createdAt }) {
   const now = new Date();
   
-  if (type === 'Note') {
-    const d = new Date(now);
-    d.setDate(d.getDate() + 30);
-    return d;
-  }
-  
-  if (type === 'Task') {
+  if (type === 'Note' || type === 'Task') {
     const d = new Date(now);
     d.setDate(d.getDate() + 30);
     return d;
@@ -211,7 +209,6 @@ itemSchema.index({ userId: 1, createdAt: -1 });
 itemSchema.index({ deleteAfter: 1 });
 itemSchema.index({ userId: 1, isLinkedEvent: 1 });
 itemSchema.index({ userId: 1, status: 1, startTime: 1 });
-// ✅ Index for snooze queries
 itemSchema.index({ userId: 1, snoozedUntil: 1 });
 
 // Safe model loading

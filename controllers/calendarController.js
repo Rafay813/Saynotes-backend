@@ -84,6 +84,9 @@ export const getCalendarAgenda = async (req, res) => {
         googleEventId: e.googleEventId || null,
         googleTaskId: e.googleTaskId || null, // ✅ ADDED
         isSynced: e.isSynced || false,        // ✅ ADDED
+        googleData: e.googleEventId           // ✅ ADDED THIS
+          ? { htmlLink: e.googleHtmlLink || null }
+          : null,
         isClientBooking: e.isClientBooking || false,
         clientName: e.clientName || null,
         clientEmail: e.clientEmail || null,
@@ -165,6 +168,7 @@ export const syncEventToGoogle = async (req, res) => {
 
     if (result.googleEventId) {
       event.googleEventId = result.googleEventId;
+      event.googleHtmlLink = result.htmlLink || null; // ✅ ADDED THIS
       event.isSynced = true;
       await event.save();
     }
