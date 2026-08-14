@@ -55,6 +55,10 @@ const itemSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  googleTaskId: {
+    type: String,
+    default: null,
+  },
   isSynced: {
     type: Boolean,
     default: false,
