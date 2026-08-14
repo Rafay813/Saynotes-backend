@@ -1,5 +1,9 @@
 import Item from '../models/Item.js';
-import { fetchGoogleCalendarEvents } from '../services/calendarService.js';
+import { 
+  fetchGoogleCalendarEvents, 
+  syncGoogleTasksToDatabase,
+  syncGoogleEventsToDatabase,
+} from '../services/calendarService.js';
 
 /**
  * @desc    Get calendar agenda - Merges local + Google Calendar events
@@ -25,6 +29,20 @@ export const getCalendarAgenda = async (req, res) => {
     endDate.setUTCHours(23, 59, 59, 999);
 
     console.log(`📅 Fetching calendar events from ${startDate} to ${endDate}`);
+
+    // ✅ Pull Google Calendar event changes (edits/cancellations/deletions) into local DB
+    try {
+      await syncGoogleEventsToDatabase(req.user._id, startDate, endDate);
+    } catch (error) {
+      console.error('❌ Google Calendar pre-sync failed (non-fatal):', error.message);
+    }
+
+    // ✅ Pull Google Tasks completion status into local DB
+    try {
+      await syncGoogleTasksToDatabase(req.user._id);
+    } catch (error) {
+      console.error('❌ Google Tasks pre-sync failed (non-fatal):', error.message);
+    }
 
     // ✅ Get local items - ALL types (Note, Task, Reminder, Event)
     const localEvents = await Item.find({
@@ -82,9 +100,9 @@ export const getCalendarAgenda = async (req, res) => {
         status: e.status,
         source: 'local',
         googleEventId: e.googleEventId || null,
-        googleTaskId: e.googleTaskId || null, // ✅ ADDED
-        isSynced: e.isSynced || false,        // ✅ ADDED
-        googleData: e.googleEventId           // ✅ ADDED THIS
+        googleTaskId: e.googleTaskId || null,
+        isSynced: e.isSynced || false,
+        googleData: e.googleEventId 
           ? { htmlLink: e.googleHtmlLink || null }
           : null,
         isClientBooking: e.isClientBooking || false,
@@ -168,7 +186,7 @@ export const syncEventToGoogle = async (req, res) => {
 
     if (result.googleEventId) {
       event.googleEventId = result.googleEventId;
-      event.googleHtmlLink = result.htmlLink || null; // ✅ ADDED THIS
+      event.googleHtmlLink = result.htmlLink || null;
       event.isSynced = true;
       await event.save();
     }

@@ -70,8 +70,50 @@ export const fetchGoogleCalendarEvents = async (userId, startDate, endDate) => {
 };
 
 /**
- * ✅ NEW: Sync Google Calendar events to database WITHOUT duplicates
- * This should be called periodically (e.g., on dashboard load)
+ * ✅ Pull Google Tasks completion status into local database
+ */
+export const syncGoogleTasksToDatabase = async (userId) => {
+  try {
+    const GoogleAdapter = (await import('./GoogleAdapter.js')).default;
+    const result = await GoogleAdapter.listGoogleTasks(userId);
+
+    if (!result.success || !result.tasks || result.tasks.length === 0) {
+      return { updated: 0 };
+    }
+
+    let updated = 0;
+
+    for (const gTask of result.tasks) {
+      const localItem = await Item.findOne({
+        userId,
+        googleTaskId: gTask.id,
+      });
+
+      if (!localItem) continue;
+
+      const googleStatus = gTask.status === 'completed' ? 'completed' : 'active';
+
+      if (localItem.status !== googleStatus) {
+        localItem.status = googleStatus;
+        if (googleStatus === 'completed') {
+          localItem.completedAt = gTask.completed ? new Date(gTask.completed) : new Date();
+        }
+        await localItem.save();
+        updated++;
+      }
+    }
+
+    console.log(`📊 Google Tasks sync: ${updated} items updated`);
+    return { updated };
+  } catch (error) {
+    console.error('❌ Google Tasks sync error:', error.message);
+    return { updated: 0 };
+  }
+};
+
+/**
+ * ✅ Sync Google Calendar events to database WITHOUT duplicates
+ * Includes safety check to prevent accidental mass deletion on empty/failed responses.
  */
 export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => {
   try {
@@ -80,7 +122,7 @@ export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => 
     // Fetch raw Google events
     const googleEvents = await fetchGoogleCalendarEvents(userId, startDate, endDate);
     if (googleEvents.length === 0) {
-      console.log('📭 No Google events to sync');
+      console.log('📭 No Google events returned from Google API; skipping database sync/cleanup to prevent data loss.');
       return { added: 0, updated: 0, deleted: 0 };
     }
 
@@ -114,7 +156,7 @@ export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => 
           location: googleEvent.location || null,
           status: googleEvent.status === 'cancelled' ? 'cancelled' : 'active',
           googleEventId: googleEvent.googleEventId,
-          googleHtmlLink: googleEvent.googleData?.htmlLink || null, // ✅ Capture htmlLink on initial database sync
+          googleHtmlLink: googleEvent.googleData?.htmlLink || null,
           isSynced: true,
           category: 'Google Calendar',
           priority: 'medium',
@@ -138,7 +180,7 @@ export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => 
             endTime: googleEvent.endTime ? new Date(googleEvent.endTime) : null,
             location: googleEvent.location || null,
             status: googleEvent.status === 'cancelled' ? 'cancelled' : 'active',
-            googleHtmlLink: googleEvent.googleData?.htmlLink || null, // ✅ Keep link fresh
+            googleHtmlLink: googleEvent.googleData?.htmlLink || null,
           });
           updated++;
           console.log(`🔄 Updated Google event: ${googleEvent.title}`);
@@ -146,7 +188,7 @@ export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => 
       }
     }
 
-    // ✅ Delete events that no longer exist in Google Calendar
+    // ✅ Delete events that no longer exist in Google Calendar (Protected by length check above)
     const googleEventIds = new Set(googleEvents.map(e => e.googleEventId));
     const eventsToDelete = existingEvents.filter(e => !googleEventIds.has(e.googleEventId));
     
@@ -183,9 +225,7 @@ export const syncWithGoogleCalendar = async (item) => {
       refresh_token: user.googleRefreshToken,
     });
 
-    // ✅ Check if we have a googleEventId
     if (item.googleEventId) {
-      // ✅ Update existing event
       const response = await calendar.events.update({
         calendarId: "primary",
         eventId: item.googleEventId,
@@ -209,9 +249,8 @@ export const syncWithGoogleCalendar = async (item) => {
       });
 
       console.log("✅ Google Calendar event updated:", response.data.id);
-      return { googleEventId: response.data.id, htmlLink: response.data.htmlLink }; // ✅ Return htmlLink
+      return { googleEventId: response.data.id, htmlLink: response.data.htmlLink };
     } else {
-      // ✅ Create new event
       const response = await calendar.events.insert({
         calendarId: "primary",
         requestBody: {
@@ -234,7 +273,7 @@ export const syncWithGoogleCalendar = async (item) => {
       });
 
       console.log("✅ Google Calendar event created:", response.data.id);
-      return { googleEventId: response.data.id, htmlLink: response.data.htmlLink }; // ✅ Return htmlLink
+      return { googleEventId: response.data.id, htmlLink: response.data.htmlLink };
     }
   } catch (error) {
     console.error("❌ Google Calendar sync error:", error.message);
@@ -310,6 +349,7 @@ export const exchangeAuthCode = async (code) => {
 export default {
   fetchGoogleCalendarEvents,
   syncGoogleEventsToDatabase,
+  syncGoogleTasksToDatabase,
   syncWithGoogleCalendar,
   deleteGoogleCalendarEvent,
   getGoogleAuthUrl,
