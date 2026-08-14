@@ -82,6 +82,8 @@ export const getCalendarAgenda = async (req, res) => {
         status: e.status,
         source: 'local',
         googleEventId: e.googleEventId || null,
+        googleTaskId: e.googleTaskId || null, // ✅ ADDED
+        isSynced: e.isSynced || false,        // ✅ ADDED
         isClientBooking: e.isClientBooking || false,
         clientName: e.clientName || null,
         clientEmail: e.clientEmail || null,
