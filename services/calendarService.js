@@ -114,6 +114,7 @@ export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => 
           location: googleEvent.location || null,
           status: googleEvent.status === 'cancelled' ? 'cancelled' : 'active',
           googleEventId: googleEvent.googleEventId,
+          googleHtmlLink: googleEvent.googleData?.htmlLink || null, // ✅ Capture htmlLink on initial database sync
           isSynced: true,
           category: 'Google Calendar',
           priority: 'medium',
@@ -137,6 +138,7 @@ export const syncGoogleEventsToDatabase = async (userId, startDate, endDate) => 
             endTime: googleEvent.endTime ? new Date(googleEvent.endTime) : null,
             location: googleEvent.location || null,
             status: googleEvent.status === 'cancelled' ? 'cancelled' : 'active',
+            googleHtmlLink: googleEvent.googleData?.htmlLink || null, // ✅ Keep link fresh
           });
           updated++;
           console.log(`🔄 Updated Google event: ${googleEvent.title}`);
@@ -173,7 +175,7 @@ export const syncWithGoogleCalendar = async (item) => {
     const user = await User.findById(item.userId);
     if (!user || !user.googleAccessToken) {
       console.log("⚠️ No Google token found, skipping sync");
-      return { googleEventId: null };
+      return { googleEventId: null, htmlLink: null };
     }
 
     oauth2Client.setCredentials({
@@ -207,7 +209,7 @@ export const syncWithGoogleCalendar = async (item) => {
       });
 
       console.log("✅ Google Calendar event updated:", response.data.id);
-      return { googleEventId: response.data.id };
+      return { googleEventId: response.data.id, htmlLink: response.data.htmlLink }; // ✅ Return htmlLink
     } else {
       // ✅ Create new event
       const response = await calendar.events.insert({
@@ -232,11 +234,11 @@ export const syncWithGoogleCalendar = async (item) => {
       });
 
       console.log("✅ Google Calendar event created:", response.data.id);
-      return { googleEventId: response.data.id };
+      return { googleEventId: response.data.id, htmlLink: response.data.htmlLink }; // ✅ Return htmlLink
     }
   } catch (error) {
     console.error("❌ Google Calendar sync error:", error.message);
-    return { googleEventId: null };
+    return { googleEventId: null, htmlLink: null };
   }
 };
 
